@@ -307,7 +307,11 @@ df_live = _apply_canvas_to_df(canvas_res.json_data if canvas_res else None, get_
 if st.session_state.get("__hydrated__", False):
     if _needs_rerun(get_state_df(), df_live):
         st.session_state.data = df_live.copy()
-        st.experimental_rerun()
+        # Compatibility: st.rerun() in newer versions, st.experimental_rerun() in older
+        if hasattr(st, 'rerun'):
+            st.rerun()
+        else:
+            st.experimental_rerun()
 else:
     st.session_state["__hydrated__"] = True
 
