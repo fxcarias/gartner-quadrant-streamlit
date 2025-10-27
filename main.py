@@ -142,7 +142,6 @@ sig = hashlib.md5(base.to_csv(index=False).encode("utf-8")).hexdigest()
 if st.session_state.get("__last_source_sig__") != sig:
     st.session_state.pop("data", None)
     st.session_state["__last_source_sig__"] = sig
-    st.session_state["__hydrated__"] = False
 
 def _init_state_from_base(_base: pd.DataFrame) -> None:
     df_init = _base.copy()
@@ -169,9 +168,24 @@ CANVAS_W, CANVAS_H, PAD = 1100, 700, 60
 
 working = get_state_df().copy()
 
-# Ejes simétricos basados en datos
-x_abs_max = float(max(abs(working["X"].min()), abs(working["X"].max()))) or 1.0
-y_abs_max = float(max(abs(working["Y"].min()), abs(working["Y"].max()))) or 1.0
+# Obtener signature del conjunto de datos actual (cambia cuando se carga nuevo CSV)
+sig = st.session_state.get('__last_source_sig__', 'default')
+
+# Calcular rangos de los ejes solo la primera vez para este conjunto de datos
+# Esto asegura que las posiciones sean consistentes incluso después de mover objetos
+ranges_key = f"__canvas_ranges_{sig}__"
+
+if ranges_key not in st.session_state:
+    # Primera vez: calcular y guardar rangos basados en los datos iniciales
+    x_abs_max = float(max(abs(working["X"].min()), abs(working["X"].max()))) or 1.0
+    y_abs_max = float(max(abs(working["Y"].min()), abs(working["Y"].max()))) or 1.0
+    st.session_state[ranges_key] = {"x_abs_max": x_abs_max, "y_abs_max": y_abs_max}
+else:
+    # Reruns: usar los rangos guardados
+    ranges = st.session_state[ranges_key]
+    x_abs_max = ranges["x_abs_max"]
+    y_abs_max = ranges["y_abs_max"]
+
 x_disp_min, x_disp_max = -x_abs_max, x_abs_max
 y_disp_min, y_disp_max = -y_abs_max, y_abs_max
 
@@ -187,6 +201,57 @@ def px_to_x(px):
 
 def px_to_y(py):
     return y_disp_max - (py - PAD) / (CANVAS_H - 2*PAD) * (y_disp_max - y_disp_min)
+
+def _apply_canvas_to_df(canvas_json, df_state: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve un DF con X,Y,Font_px,Width_px tal como se ven en el lienzo."""
+    df_upd = df_state.copy()
+    if not canvas_json or "objects" not in canvas_json:
+        return df_upd
+    df_upd = df_upd.set_index("Label")
+    objs = canvas_json.get("objects", [])
+    obj_map = {}
+    for o in objs:
+        if o.get("type") != "textbox":
+            continue
+        name = o.get("name", "")
+        txt = o.get("text", "")
+        if isinstance(name, str) and name.startswith("lbl::"):
+            lab = name.split("lbl::", 1)[1]
+            obj_map[lab] = o
+        elif isinstance(txt, str) and txt in df_upd.index and txt not in obj_map:
+            obj_map[txt] = o
+    
+    for lab in df_upd.index.tolist():
+        o = obj_map.get(lab)
+        if not o:
+            continue
+        
+        # Obtener coordenadas actuales del canvas
+        left = float(o.get("left", np.nan))
+        top = float(o.get("top", np.nan))
+        
+        # Convertir a coordenadas del gráfico
+        if not np.isnan(left) and not np.isnan(top):
+            df_upd.loc[lab, "X"] = px_to_x(left)
+            df_upd.loc[lab, "Y"] = px_to_y(top)
+        
+        # Leer tamaños y escalas del canvas
+        font_sz = float(o.get("fontSize", df_upd.loc[lab, "Font_px"])) if "Font_px" in df_upd.columns else float(o.get("fontSize", 14.0))
+        width_obj = float(o.get("width", df_upd.loc[lab, "Width_px"])) if "Width_px" in df_upd.columns else float(o.get("width", 180.0))
+        sx = float(o.get("scaleX", 1.0) or 1.0)
+        sy = float(o.get("scaleY", 1.0) or 1.0)
+        
+        # Calcular tamaños efectivos (fontSize * scale, width * scale)
+        eff_font = float(np.clip(font_sz * max(sx, sy), 6.0, 400.0))
+        eff_width = float(np.clip(width_obj * sx, 40.0, 2000.0))
+        
+        df_upd.loc[lab, "Font_px"] = float(np.round(eff_font, 1))
+        df_upd.loc[lab, "Width_px"] = float(np.round(eff_width, 1))
+    
+    return df_upd.reset_index()
+
+# El canvas se genera siempre desde el estado base (sin cambios durante interacciones)
+# Solo leeremos el canvas cuando el usuario descargue el CSV
 
 x0_px = x_to_px(0.0)
 y0_px = y_to_px(0.0)
@@ -219,7 +284,7 @@ for t in range(-10, 11):
     if t % 2 == 0:
         objects.append({"type": "textbox", "left": x0_px - 8, "top": y_px, "originX": "right", "originY": "center", "text": str(t), "fontSize": 9, "fill": "#9CA3AF", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False})
 
-# Labels de datos (solo texto) normalizados sin escalas
+# Labels de datos (solo texto)
 for i, (_, r) in enumerate(working.iterrows()):
     cx = float(x_to_px(r["X"]))
     cy = float(y_to_px(r["Y"]))
@@ -242,7 +307,19 @@ for i, (_, r) in enumerate(working.iterrows()):
         "scaleX": 1.0, "scaleY": 1.0
     })
 
-initial_json = {"version": "5.2.4", "objects": objects}
+# Key única para cada conjunto de datos (usa el sig ya obtenido arriba)
+canvas_key = f"magic_quadrant_canvas_{sig}"
+canvas_json_key = f"__canvas_initial_{sig}__"
+
+# Generar initial_json solo la primera vez para este conjunto de datos
+# Guardarlo para reutilizar en reruns y evitar que el canvas se regenere
+if canvas_json_key not in st.session_state:
+    # Primera vez con este CSV: generar y guardar
+    initial_json = {"version": "5.2.4", "objects": objects}
+    st.session_state[canvas_json_key] = initial_json
+else:
+    # Reruns subsecuentes con el mismo CSV: reutilizar el guardado
+    initial_json = st.session_state[canvas_json_key]
 
 canvas_res = st_canvas(
     fill_color="rgba(0,0,0,0)", background_color="#ffffff",
@@ -250,70 +327,14 @@ canvas_res = st_canvas(
     drawing_mode="transform",
     initial_drawing=initial_json,
     display_toolbar=False,
-    key="magic_quadrant_canvas_text"
+    key=canvas_key
 )
 
 # ---------------------------- Lectura del canvas y exportación ----------------------------
 
-def _apply_canvas_to_df(canvas_json, df_state: pd.DataFrame) -> pd.DataFrame:
-    """Devuelve un DF con X,Y,Font_px,Width_px tal como se ven en el lienzo."""
-    df_upd = df_state.copy()
-    if not canvas_json or "objects" not in canvas_json:
-        return df_upd
-    df_upd = df_upd.set_index("Label")
-    objs = canvas_json.get("objects", [])
-    obj_map = {}
-    for o in objs:
-        if o.get("type") != "textbox":
-            continue
-        name = o.get("name", "")
-        txt = o.get("text", "")
-        if isinstance(name, str) and name.startswith("lbl::"):
-            lab = name.split("lbl::", 1)[1]
-            obj_map[lab] = o
-        elif isinstance(txt, str) and txt in df_upd.index and txt not in obj_map:
-            obj_map[txt] = o
-    for lab in df_upd.index.tolist():
-        o = obj_map.get(lab)
-        if not o:
-            continue
-        left = float(o.get("left", np.nan)); top = float(o.get("top", np.nan))
-        if not np.isnan(left) and not np.isnan(top):
-            df_upd.loc[lab, "X"] = px_to_x(left)
-            df_upd.loc[lab, "Y"] = px_to_y(top)
-        font_sz = float(o.get("fontSize", df_upd.loc[lab, "Font_px"])) if "Font_px" in df_upd.columns else float(o.get("fontSize", 14.0))
-        sx = float(o.get("scaleX", 1.0) or 1.0); sy = float(o.get("scaleY", 1.0) or 1.0)
-        width_obj = float(o.get("width", df_upd.loc[lab, "Width_px"])) if "Width_px" in df_upd.columns else float(o.get("width", 180.0))
-        eff_font = float(np.clip(font_sz * max(sx, sy), 6.0, 400.0)); eff_font = float(np.round(eff_font, 2))
-        if (sx == 1.0 and sy == 1.0) and isinstance(o.get("height"), (int, float)):
-            h = float(o.get("height")); est = max(6.0, min(400.0, h / 1.2)); eff_font = max(eff_font, est)
-        eff_width = float(np.clip(width_obj * sx, 40.0, 2000.0)); eff_width = float(np.round(eff_width, 2))
-        df_upd.loc[lab, "Font_px"] = eff_font
-        df_upd.loc[lab, "Width_px"] = eff_width
-    return df_upd.reset_index()
-
-# Normalización anti-parpadeo
-
-def _needs_rerun(a: pd.DataFrame, b: pd.DataFrame) -> bool:
-    need_cols = ["Font_px","Width_px","X","Y"]
-    if any(c not in a.columns or c not in b.columns for c in need_cols):
-        return True
-    a2 = a.set_index("Label")[need_cols].sort_index().round(2)
-    b2 = b.set_index("Label")[need_cols].sortIndex().round(2) if hasattr(b.set_index("Label"), 'sortIndex') else b.set_index("Label")[need_cols].sort_index().round(2)
-    return not a2.equals(b2)
-
-# Construimos DF "en vivo" y control de hidratación
+# Leer el estado actual del canvas para exportar
+# Esto NO causa reruns, solo lee los datos cuando el usuario interactúa con el botón
 df_live = _apply_canvas_to_df(canvas_res.json_data if canvas_res else None, get_state_df())
-if st.session_state.get("__hydrated__", False):
-    if _needs_rerun(get_state_df(), df_live):
-        st.session_state.data = df_live.copy()
-        # Compatibility: st.rerun() in newer versions, st.experimental_rerun() in older
-        if hasattr(st, 'rerun'):
-            st.rerun()
-        else:
-            st.experimental_rerun()
-else:
-    st.session_state["__hydrated__"] = True
 
 # Exportar con nombres de ejes visibles
 _df_export = df_live.rename(columns={"X": x_label, "Y": y_label})
