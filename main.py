@@ -18,6 +18,12 @@ def sample_data():
     })
     return df
 
+@st.cache_data(ttl=300)  # Cache por 5 minutos
+def load_csv_from_url(url):
+    """Carga un CSV desde URL con cache para evitar recargas múltiples."""
+    src = normalize_drive_csv_url(url)
+    return pd.read_csv(src)
+
 # ---------------------------- Utilidades ----------------------------
 def normalize_drive_csv_url(url: str) -> str:
     url = url.strip()
@@ -42,27 +48,38 @@ PALETTE = [
 
 # ---------------------------- Sidebar: carga de datos ----------------------------
 st.sidebar.header("Datos")
+
+# URL por defecto
+DEFAULT_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT03vitsRz5kTfx8GCLjMc6j6fzclnppE7z_nZ969EiOL-9MaNcavcRRChPVl27UOHVi2n26THw1zjU/pub?gid=0&single=true&output=csv"
+
 uploaded = st.sidebar.file_uploader("Sube un CSV", type=["csv"]) 
-url_csv = st.sidebar.text_input("o pega una URL CSV (Google Drive publicado o HTTP)", "")
+url_csv = st.sidebar.text_input("o pega una URL CSV (Google Drive publicado o HTTP)", DEFAULT_CSV_URL)
 
 _df = None
-if url_csv.strip():
-    try:
-        src = normalize_drive_csv_url(url_csv)
-        _df = pd.read_csv(src)
-        st.sidebar.success("CSV cargado desde URL.")
-    except Exception as e:
-        st.sidebar.error(f"No se pudo leer la URL: {e}")
 
-if _df is None and uploaded is not None:
+# Prioridad 1: Archivo subido
+if uploaded is not None:
     try:
         _df = pd.read_csv(uploaded)
         st.sidebar.success("CSV cargado desde archivo.")
     except Exception as e:
         st.sidebar.error(f"No se pudo leer el archivo: {e}")
 
+# Prioridad 2: URL (incluyendo la URL por defecto)
+if _df is None and url_csv.strip():
+    try:
+        _df = load_csv_from_url(url_csv)
+        if url_csv == DEFAULT_CSV_URL:
+            st.sidebar.success("CSV cargado desde fuente por defecto.")
+        else:
+            st.sidebar.success("CSV cargado desde URL.")
+    except Exception as e:
+        st.sidebar.error(f"No se pudo leer la URL: {e}")
+
+# Prioridad 3: Datos de ejemplo (solo si todo falla)
 if _df is None:
     _df = sample_data()
+    st.sidebar.info("Usando datos de ejemplo.")
 
 # Columnas detectadas
 _text_cols_all = list(_df.select_dtypes(include=["object","string","category"]).columns)
@@ -84,18 +101,28 @@ if has_label and has_xy:
     x_label, y_label = "X", "Y"
     is_state_csv = True
 elif has_label:
-    # Intentar detectar 2 numéricas como ejes personalizados
+    # CSV con Label pero sin X,Y: permitir selección de ejes
     axis_candidates = [c for c in num_cols_all]
     if len(axis_candidates) >= 2:
-        x_label, y_label = axis_candidates[0], axis_candidates[1]
+        # Auto-detectar ejes sugeridos
+        default_x_idx = 0
+        default_y_idx = min(1, len(axis_candidates)-1)
+        
+        # Selectboxes para elegir ejes
+        st.sidebar.subheader("Ejes")
+        label_col = st.sidebar.selectbox("Columna etiqueta", ["Label"], index=0, disabled=True, key="label_col_fixed")
+        x_col = st.sidebar.selectbox("Eje X", axis_candidates, index=default_x_idx, key="x_col_selector")
+        y_col = st.sidebar.selectbox("Eje Y", axis_candidates, index=default_y_idx, key="y_col_selector")
+        
         df_raw = _df.copy()
         if "Font_px" not in df_raw.columns: df_raw["Font_px"] = 14.0
         if "Width_px" not in df_raw.columns:
             df_raw["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in df_raw["Label"]]
-        base = df_raw[["Label", x_label, y_label, "Font_px", "Width_px"]].rename(columns={x_label:"X", y_label:"Y"}).copy()
-        is_state_csv = True
+        base = df_raw[["Label", x_col, y_col, "Font_px", "Width_px"]].rename(columns={x_col:"X", y_col:"Y"}).copy()
+        x_label, y_label = x_col, y_col
+        is_state_csv = False  # No es CSV de estado, es CSV normal con selección de ejes
     else:
-        # Modo normal con selección manual
+        # Menos de 2 columnas numéricas: mostrar error o usar selección manual
         if not has_label:
             _df["Label"] = _df.index.astype(str)
         if len(_text_cols_all) == 0:
@@ -121,21 +148,22 @@ else:
     x_label, y_label = x_col, y_col
     is_state_csv = False
 
-# Mostrar combos informativos (si estado CSV, deshabilitados pero con valores)
-st.sidebar.subheader("Ejes")
-_label_opts = _text_cols_all if len(_text_cols_all) > 0 else ["Label"]
-try:
-    _label_idx = _label_opts.index("Label")
-except ValueError:
-    _label_opts = ["Label"] + _label_opts
-    _label_idx = 0
-st.sidebar.selectbox("Columna etiqueta", _label_opts, index=_label_idx, disabled=True, key="ui_label_col")
-_x_opts = list(dict.fromkeys(list(_num_cols_all) + ([x_label] if x_label not in _num_cols_all else []))) or [x_label]
-_y_opts = list(dict.fromkeys(list(_num_cols_all) + ([y_label] if y_label not in _num_cols_all else []))) or [y_label]
-_x_idx = _x_opts.index(x_label) if x_label in _x_opts else 0
-_y_idx = _y_opts.index(y_label) if y_label in _y_opts else 0
-st.sidebar.selectbox("Eje X", _x_opts, index=_x_idx, disabled=is_state_csv, key="ui_x_col")
-st.sidebar.selectbox("Eje Y", _y_opts, index=_y_idx, disabled=is_state_csv, key="ui_y_col")
+# Mostrar combos informativos solo para CSVs de estado (con columnas X,Y)
+if is_state_csv:
+    st.sidebar.subheader("Ejes")
+    _label_opts = _text_cols_all if len(_text_cols_all) > 0 else ["Label"]
+    try:
+        _label_idx = _label_opts.index("Label")
+    except ValueError:
+        _label_opts = ["Label"] + _label_opts
+        _label_idx = 0
+    st.sidebar.selectbox("Columna etiqueta", _label_opts, index=_label_idx, disabled=True, key="ui_label_col")
+    _x_opts = list(dict.fromkeys(list(_num_cols_all) + ([x_label] if x_label not in _num_cols_all else []))) or [x_label]
+    _y_opts = list(dict.fromkeys(list(_num_cols_all) + ([y_label] if y_label not in _num_cols_all else []))) or [y_label]
+    _x_idx = _x_opts.index(x_label) if x_label in _x_opts else 0
+    _y_idx = _y_opts.index(y_label) if y_label in _y_opts else 0
+    st.sidebar.selectbox("Eje X", _x_opts, index=_x_idx, disabled=True, key="ui_x_col")
+    st.sidebar.selectbox("Eje Y", _y_opts, index=_y_idx, disabled=True, key="ui_y_col")
 
 # ---------------------------- Estado robusto ----------------------------
 sig = hashlib.md5(base.to_csv(index=False).encode("utf-8")).hexdigest()
@@ -336,10 +364,33 @@ canvas_res = st_canvas(
 # Esto NO causa reruns, solo lee los datos cuando el usuario interactúa con el botón
 df_live = _apply_canvas_to_df(canvas_res.json_data if canvas_res else None, get_state_df())
 
-# Exportar con nombres de ejes visibles
-_df_export = df_live.rename(columns={"X": x_label, "Y": y_label})
-cols_export = [c for c in ["Label", x_label, y_label, "Font_px", "Width_px"] if c in _df_export.columns]
-_df_export = _df_export[cols_export]
+# Exportar: combinar datos originales con posiciones actualizadas
+# Partir del CSV original para mantener todas las columnas
+_df_export = _df.copy()
+
+# Actualizar con los datos del canvas (posiciones, tamaños)
+df_live_renamed = df_live.rename(columns={"X": x_label, "Y": y_label})
+
+# Actualizar las columnas de ejes con las posiciones del canvas
+for col in [x_label, y_label]:
+    if col in _df_export.columns and col in df_live_renamed.columns:
+        _df_export[col] = df_live_renamed[col]
+
+# Actualizar o agregar Font_px y Width_px
+_df_export["Font_px"] = df_live_renamed["Font_px"]
+_df_export["Width_px"] = df_live_renamed["Width_px"]
+
+# Asegurar que Label esté primero, seguido de las columnas de ejes, luego el resto
+cols_order = ["Label"]
+if x_label in _df_export.columns and x_label != "Label":
+    cols_order.append(x_label)
+if y_label in _df_export.columns and y_label != "Label" and y_label != x_label:
+    cols_order.append(y_label)
+# Agregar todas las demás columnas que no están en cols_order
+for col in _df_export.columns:
+    if col not in cols_order:
+        cols_order.append(col)
+_df_export = _df_export[cols_order]
 
 csv = _df_export.to_csv(index=False).encode("utf-8")
 st.download_button("📥 Descargar CSV actualizado (estado actual)", csv, file_name="cuadrante_actualizado.csv", mime="text/csv")
