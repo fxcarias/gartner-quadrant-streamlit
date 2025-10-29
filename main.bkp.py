@@ -1,0 +1,396 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import re, hashlib
+from streamlit_drawable_canvas import st_canvas
+
+st.set_page_config(page_title="Fuxion TI", layout="wide")
+
+# ---------------------------- Datos de ejemplo ----------------------------
+@st.cache_data
+def sample_data():
+    np.random.seed(7)
+    vendors = [f"Vendor {c}" for c in list("ABCDEFGHIJKLMN")]
+    df = pd.DataFrame({
+        "Label": vendors,
+        "Ability_to_Execute": np.random.uniform(20, 100, len(vendors)),
+        "Completeness_of_Vision": np.random.uniform(20, 100, len(vendors)),
+    })
+    return df
+
+@st.cache_data(ttl=300)  # Cache por 5 minutos
+def load_csv_from_url(url):
+    """Carga un CSV desde URL con cache para evitar recargas múltiples."""
+    src = normalize_drive_csv_url(url)
+    return pd.read_csv(src)
+
+# ---------------------------- Utilidades ----------------------------
+def normalize_drive_csv_url(url: str) -> str:
+    url = url.strip()
+    if not url:
+        return url
+    if "docs.google.com/spreadsheets" in url and "output=csv" in url:
+        return url
+    m = re.search(r"/file/d/([A-Za-z0-9_-]+)", url)
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    m = re.search(r"[?&]id=([A-Za-z0-9_-]+)", url)
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    return url
+
+PALETTE = [
+    "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b",
+    "#e377c2","#7f7f7f","#bcbd22","#17becf","#4e79a7","#f28e2b",
+    "#59a14f","#e15759","#76b7b2","#edc948","#b07aa1","#ff9da6",
+    "#9c755f","#bab0ab"
+]
+
+# ---------------------------- Sidebar: carga de datos ----------------------------
+st.sidebar.header("Datos")
+
+# URL por defecto
+DEFAULT_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT03vitsRz5kTfx8GCLjMc6j6fzclnppE7z_nZ969EiOL-9MaNcavcRRChPVl27UOHVi2n26THw1zjU/pub?gid=0&single=true&output=csv"
+
+uploaded = st.sidebar.file_uploader("Sube un CSV", type=["csv"]) 
+url_csv = st.sidebar.text_input("o pega una URL CSV (Google Drive publicado o HTTP)", DEFAULT_CSV_URL)
+
+_df = None
+
+# Prioridad 1: Archivo subido
+if uploaded is not None:
+    try:
+        _df = pd.read_csv(uploaded)
+        st.sidebar.success("CSV cargado desde archivo.")
+    except Exception as e:
+        st.sidebar.error(f"No se pudo leer el archivo: {e}")
+
+# Prioridad 2: URL (incluyendo la URL por defecto)
+if _df is None and url_csv.strip():
+    try:
+        _df = load_csv_from_url(url_csv)
+        if url_csv == DEFAULT_CSV_URL:
+            st.sidebar.success("CSV cargado desde fuente por defecto.")
+        else:
+            st.sidebar.success("CSV cargado desde URL.")
+    except Exception as e:
+        st.sidebar.error(f"No se pudo leer la URL: {e}")
+
+# Prioridad 3: Datos de ejemplo (solo si todo falla)
+if _df is None:
+    _df = sample_data()
+    st.sidebar.info("Usando datos de ejemplo.")
+
+# Columnas detectadas
+_text_cols_all = list(_df.select_dtypes(include=["object","string","category"]).columns)
+_num_cols_all  = list(_df.select_dtypes(include=["number"]).columns)
+
+# Detección de CSV de estado/exportado por la app
+has_label = "Label" in _df.columns
+has_xy = {"X","Y"}.issubset(_df.columns)
+num_cols_all = [c for c in _num_cols_all if c not in {"Font_px","Width_px"}]
+
+# Elegir base y nombres de ejes visibles
+if has_label and has_xy:
+    # CSV estado clásico
+    df_raw = _df.copy()
+    if "Font_px" not in df_raw.columns: df_raw["Font_px"] = 14.0
+    if "Width_px" not in df_raw.columns:
+        df_raw["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in df_raw["Label"]]
+    base = df_raw[["Label","X","Y","Font_px","Width_px"]].copy()
+    x_label, y_label = "X", "Y"
+    is_state_csv = True
+elif has_label:
+    # CSV con Label pero sin X,Y: permitir selección de ejes
+    axis_candidates = [c for c in num_cols_all]
+    if len(axis_candidates) >= 2:
+        # Auto-detectar ejes sugeridos
+        default_x_idx = 0
+        default_y_idx = min(1, len(axis_candidates)-1)
+        
+        # Selectboxes para elegir ejes
+        st.sidebar.subheader("Ejes")
+        label_col = st.sidebar.selectbox("Columna etiqueta", ["Label"], index=0, disabled=True, key="label_col_fixed")
+        x_col = st.sidebar.selectbox("Eje X", axis_candidates, index=default_x_idx, key="x_col_selector")
+        y_col = st.sidebar.selectbox("Eje Y", axis_candidates, index=default_y_idx, key="y_col_selector")
+        
+        df_raw = _df.copy()
+        if "Font_px" not in df_raw.columns: df_raw["Font_px"] = 14.0
+        if "Width_px" not in df_raw.columns:
+            df_raw["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in df_raw["Label"]]
+        base = df_raw[["Label", x_col, y_col, "Font_px", "Width_px"]].rename(columns={x_col:"X", y_col:"Y"}).copy()
+        x_label, y_label = x_col, y_col
+        is_state_csv = False  # No es CSV de estado, es CSV normal con selección de ejes
+    else:
+        # Menos de 2 columnas numéricas: mostrar error o usar selección manual
+        if not has_label:
+            _df["Label"] = _df.index.astype(str)
+        if len(_text_cols_all) == 0:
+            _df["Label"] = _df.index.astype(str)
+            _text_cols_all = ["Label"]
+        label_col = st.sidebar.selectbox("Columna etiqueta", _text_cols_all, index=0)
+        x_col = st.sidebar.selectbox("Eje X", _num_cols_all, index=min(1, len(_num_cols_all)-1))
+        y_col = st.sidebar.selectbox("Eje Y", _num_cols_all, index=min(0, len(_num_cols_all)-1))
+        base = _df[[label_col, x_col, y_col]].dropna().copy().rename(columns={label_col:"Label", x_col:"X", y_col:"Y"})
+        base["Font_px"] = 14.0
+        base["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in base["Label"]]
+        x_label, y_label = x_col, y_col
+        is_state_csv = False
+else:
+    # CSV sin Label: fallback
+    _df["Label"] = _df.index.astype(str)
+    _text_cols_all = list(dict.fromkeys(["Label"] + _text_cols_all))
+    x_col = st.sidebar.selectbox("Eje X", _num_cols_all, index=min(1, len(_num_cols_all)-1))
+    y_col = st.sidebar.selectbox("Eje Y", _num_cols_all, index=min(0, len(_num_cols_all)-1))
+    base = _df[["Label", x_col, y_col]].dropna().copy().rename(columns={x_col:"X", y_col:"Y"})
+    base["Font_px"] = 14.0
+    base["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in base["Label"]]
+    x_label, y_label = x_col, y_col
+    is_state_csv = False
+
+# Mostrar combos informativos solo para CSVs de estado (con columnas X,Y)
+if is_state_csv:
+    st.sidebar.subheader("Ejes")
+    _label_opts = _text_cols_all if len(_text_cols_all) > 0 else ["Label"]
+    try:
+        _label_idx = _label_opts.index("Label")
+    except ValueError:
+        _label_opts = ["Label"] + _label_opts
+        _label_idx = 0
+    st.sidebar.selectbox("Columna etiqueta", _label_opts, index=_label_idx, disabled=True, key="ui_label_col")
+    _x_opts = list(dict.fromkeys(list(_num_cols_all) + ([x_label] if x_label not in _num_cols_all else []))) or [x_label]
+    _y_opts = list(dict.fromkeys(list(_num_cols_all) + ([y_label] if y_label not in _num_cols_all else []))) or [y_label]
+    _x_idx = _x_opts.index(x_label) if x_label in _x_opts else 0
+    _y_idx = _y_opts.index(y_label) if y_label in _y_opts else 0
+    st.sidebar.selectbox("Eje X", _x_opts, index=_x_idx, disabled=True, key="ui_x_col")
+    st.sidebar.selectbox("Eje Y", _y_opts, index=_y_idx, disabled=True, key="ui_y_col")
+
+# ---------------------------- Estado robusto ----------------------------
+sig = hashlib.md5(base.to_csv(index=False).encode("utf-8")).hexdigest()
+if st.session_state.get("__last_source_sig__") != sig:
+    st.session_state.pop("data", None)
+    st.session_state["__last_source_sig__"] = sig
+
+def _init_state_from_base(_base: pd.DataFrame) -> None:
+    df_init = _base.copy()
+    if "Font_px" not in df_init.columns:
+        df_init["Font_px"] = 14.0
+    df_init["Font_px"] = pd.to_numeric(df_init["Font_px"], errors="coerce").fillna(14.0).clip(6, 400)
+    if "Width_px" not in df_init.columns:
+        df_init["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in df_init["Label"]]
+    df_init["Width_px"] = pd.to_numeric(df_init["Width_px"], errors="coerce").fillna(180.0).clip(40, 2000)
+    st.session_state.data = df_init
+
+def get_state_df() -> pd.DataFrame:
+    if "data" not in st.session_state:
+        _init_state_from_base(base)
+    return st.session_state.data
+
+# Inicializa ya
+_ = get_state_df()
+
+# ---------------------------- Canvas ----------------------------
+st.title("Fuxion TI")
+
+CANVAS_W, CANVAS_H, PAD = 1100, 700, 60
+
+working = get_state_df().copy()
+
+# Obtener signature del conjunto de datos actual (cambia cuando se carga nuevo CSV)
+sig = st.session_state.get('__last_source_sig__', 'default')
+
+# Calcular rangos de los ejes solo la primera vez para este conjunto de datos
+# Esto asegura que las posiciones sean consistentes incluso después de mover objetos
+ranges_key = f"__canvas_ranges_{sig}__"
+
+if ranges_key not in st.session_state:
+    # Primera vez: calcular y guardar rangos basados en los datos iniciales
+    x_abs_max = float(max(abs(working["X"].min()), abs(working["X"].max()))) or 1.0
+    y_abs_max = float(max(abs(working["Y"].min()), abs(working["Y"].max()))) or 1.0
+    st.session_state[ranges_key] = {"x_abs_max": x_abs_max, "y_abs_max": y_abs_max}
+else:
+    # Reruns: usar los rangos guardados
+    ranges = st.session_state[ranges_key]
+    x_abs_max = ranges["x_abs_max"]
+    y_abs_max = ranges["y_abs_max"]
+
+x_disp_min, x_disp_max = -x_abs_max, x_abs_max
+y_disp_min, y_disp_max = -y_abs_max, y_abs_max
+
+def x_to_px(x):
+    return PAD + (x - x_disp_min) / (x_disp_max - x_disp_min) * (CANVAS_W - 2*PAD)
+
+def y_to_px(y):
+    # invertido (arriba mayor)
+    return PAD + (y_disp_max - y) / (y_disp_max - y_disp_min) * (CANVAS_H - 2*PAD)
+
+def px_to_x(px):
+    return x_disp_min + (px - PAD) / (CANVAS_W - 2*PAD) * (x_disp_max - x_disp_min)
+
+def px_to_y(py):
+    return y_disp_max - (py - PAD) / (CANVAS_H - 2*PAD) * (y_disp_max - y_disp_min)
+
+def _apply_canvas_to_df(canvas_json, df_state: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve un DF con X,Y,Font_px,Width_px tal como se ven en el lienzo."""
+    df_upd = df_state.copy()
+    if not canvas_json or "objects" not in canvas_json:
+        return df_upd
+    df_upd = df_upd.set_index("Label")
+    objs = canvas_json.get("objects", [])
+    obj_map = {}
+    for o in objs:
+        if o.get("type") != "textbox":
+            continue
+        name = o.get("name", "")
+        txt = o.get("text", "")
+        if isinstance(name, str) and name.startswith("lbl::"):
+            lab = name.split("lbl::", 1)[1]
+            obj_map[lab] = o
+        elif isinstance(txt, str) and txt in df_upd.index and txt not in obj_map:
+            obj_map[txt] = o
+    
+    for lab in df_upd.index.tolist():
+        o = obj_map.get(lab)
+        if not o:
+            continue
+        
+        # Obtener coordenadas actuales del canvas
+        left = float(o.get("left", np.nan))
+        top = float(o.get("top", np.nan))
+        
+        # Convertir a coordenadas del gráfico
+        if not np.isnan(left) and not np.isnan(top):
+            df_upd.loc[lab, "X"] = px_to_x(left)
+            df_upd.loc[lab, "Y"] = px_to_y(top)
+        
+        # Leer tamaños y escalas del canvas
+        font_sz = float(o.get("fontSize", df_upd.loc[lab, "Font_px"])) if "Font_px" in df_upd.columns else float(o.get("fontSize", 14.0))
+        width_obj = float(o.get("width", df_upd.loc[lab, "Width_px"])) if "Width_px" in df_upd.columns else float(o.get("width", 180.0))
+        sx = float(o.get("scaleX", 1.0) or 1.0)
+        sy = float(o.get("scaleY", 1.0) or 1.0)
+        
+        # Calcular tamaños efectivos (fontSize * scale, width * scale)
+        eff_font = float(np.clip(font_sz * max(sx, sy), 6.0, 400.0))
+        eff_width = float(np.clip(width_obj * sx, 40.0, 2000.0))
+        
+        df_upd.loc[lab, "Font_px"] = float(np.round(eff_font, 1))
+        df_upd.loc[lab, "Width_px"] = float(np.round(eff_width, 1))
+    
+    return df_upd.reset_index()
+
+# El canvas se genera siempre desde el estado base (sin cambios durante interacciones)
+# Solo leeremos el canvas cuando el usuario descargue el CSV
+
+x0_px = x_to_px(0.0)
+y0_px = y_to_px(0.0)
+
+objects = [
+    # Ejes bloqueados
+    {"type": "line", "x1": PAD, "y1": y0_px, "x2": CANVAS_W - PAD, "y2": y0_px,
+     "stroke": "#9CA3AF", "strokeWidth": 1, "strokeDashArray": [6,4],
+     "selectable": False, "evented": False, "hoverCursor": "default"},
+    {"type": "line", "x1": x0_px, "y1": PAD, "x2": x0_px, "y2": CANVAS_H - PAD,
+     "stroke": "#9CA3AF", "strokeWidth": 1, "strokeDashArray": [6,4],
+     "selectable": False, "evented": False, "hoverCursor": "default"},
+    # Labels de ejes en ambos extremos (plomo, pequeños, fijos)
+    {"type": "textbox", "left": PAD, "top": y0_px + 10, "originX": "left",  "originY": "top",    "text": str(x_label), "fontSize": 10, "fill": "#6B7280", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False},
+    {"type": "textbox", "left": CANVAS_W - PAD, "top": y0_px + 10, "originX": "right", "originY": "top",    "text": str(x_label), "fontSize": 10, "fill": "#6B7280", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False},
+    {"type": "textbox", "left": x0_px + 10, "top": PAD,           "originX": "left",  "originY": "top",    "text": str(y_label), "fontSize": 10, "fill": "#6B7280", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False},
+    {"type": "textbox", "left": x0_px + 10, "top": CANVAS_H - PAD, "originX": "left",  "originY": "bottom", "text": str(y_label), "fontSize": 10, "fill": "#6B7280", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False},
+]
+
+# Ticks -10..10
+for t in range(-10, 11):
+    x_val = (t / 10.0) * x_abs_max
+    x_px = x_to_px(x_val)
+    objects.append({"type": "line", "x1": x_px, "y1": y0_px - 4, "x2": x_px, "y2": y0_px + 4, "stroke": "#CBD5E1", "strokeWidth": 1, "selectable": False, "evented": False})
+    if t % 2 == 0:
+        objects.append({"type": "textbox", "left": x_px, "top": y0_px + 14, "originX": "center", "originY": "top", "text": str(t), "fontSize": 9, "fill": "#9CA3AF", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False})
+    y_val = (t / 10.0) * y_abs_max
+    y_px = y_to_px(y_val)
+    objects.append({"type": "line", "x1": x0_px - 4, "y1": y_px, "x2": x0_px + 4, "y2": y_px, "stroke": "#CBD5E1", "strokeWidth": 1, "selectable": False, "evented": False})
+    if t % 2 == 0:
+        objects.append({"type": "textbox", "left": x0_px - 8, "top": y_px, "originX": "right", "originY": "center", "text": str(t), "fontSize": 9, "fill": "#9CA3AF", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False})
+
+# Labels de datos (solo texto)
+for i, (_, r) in enumerate(working.iterrows()):
+    cx = float(x_to_px(r["X"]))
+    cy = float(y_to_px(r["Y"]))
+    color = PALETTE[i % len(PALETTE)]
+    label = str(r["Label"]) if "Label" in r else str(i)
+    font_px = float(r.get("Font_px", 14.0))
+    width_px = float(r.get("Width_px", 180.0))
+    objects.append({
+        "type": "textbox",
+        "left": cx, "top": cy,
+        "originX": "center", "originY": "center",
+        "text": label,
+        "fontSize": font_px, "fontFamily": "Arial",
+        "width": width_px,
+        "fill": color,
+        "editable": False, "selectable": True,
+        "hasControls": True, "lockUniScaling": False, "lockScalingFlip": True,
+        "splitByGrapheme": True, "textAlign": "center",
+        "name": f"lbl::{label}",
+        "scaleX": 1.0, "scaleY": 1.0
+    })
+
+# Key única para cada conjunto de datos (usa el sig ya obtenido arriba)
+canvas_key = f"magic_quadrant_canvas_{sig}"
+canvas_json_key = f"__canvas_initial_{sig}__"
+
+# Generar initial_json solo la primera vez para este conjunto de datos
+# Guardarlo para reutilizar en reruns y evitar que el canvas se regenere
+if canvas_json_key not in st.session_state:
+    # Primera vez con este CSV: generar y guardar
+    initial_json = {"version": "5.2.4", "objects": objects}
+    st.session_state[canvas_json_key] = initial_json
+else:
+    # Reruns subsecuentes con el mismo CSV: reutilizar el guardado
+    initial_json = st.session_state[canvas_json_key]
+
+canvas_res = st_canvas(
+    fill_color="rgba(0,0,0,0)", background_color="#ffffff",
+    height=CANVAS_H, width=CANVAS_W,
+    drawing_mode="transform",
+    initial_drawing=initial_json,
+    display_toolbar=False,
+    key=canvas_key
+)
+
+# ---------------------------- Lectura del canvas y exportación ----------------------------
+
+# Leer el estado actual del canvas para exportar
+# Esto NO causa reruns, solo lee los datos cuando el usuario interactúa con el botón
+df_live = _apply_canvas_to_df(canvas_res.json_data if canvas_res else None, get_state_df())
+
+# Exportar: combinar datos originales con posiciones actualizadas
+# Partir del CSV original para mantener todas las columnas
+_df_export = _df.copy()
+
+# Actualizar con los datos del canvas (posiciones, tamaños)
+df_live_renamed = df_live.rename(columns={"X": x_label, "Y": y_label})
+
+# Actualizar las columnas de ejes con las posiciones del canvas
+for col in [x_label, y_label]:
+    if col in _df_export.columns and col in df_live_renamed.columns:
+        _df_export[col] = df_live_renamed[col]
+
+# Actualizar o agregar Font_px y Width_px
+_df_export["Font_px"] = df_live_renamed["Font_px"]
+_df_export["Width_px"] = df_live_renamed["Width_px"]
+
+# Asegurar que Label esté primero, seguido de las columnas de ejes, luego el resto
+cols_order = ["Label"]
+if x_label in _df_export.columns and x_label != "Label":
+    cols_order.append(x_label)
+if y_label in _df_export.columns and y_label != "Label" and y_label != x_label:
+    cols_order.append(y_label)
+# Agregar todas las demás columnas que no están en cols_order
+for col in _df_export.columns:
+    if col not in cols_order:
+        cols_order.append(col)
+_df_export = _df_export[cols_order]
+
+csv = _df_export.to_csv(index=False).encode("utf-8")
+st.download_button("📥 Descargar CSV actualizado (estado actual)", csv, file_name="cuadrante_actualizado.csv", mime="text/csv")

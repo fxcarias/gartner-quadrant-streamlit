@@ -440,20 +440,6 @@ def get_state_df() -> pd.DataFrame:
 _ = get_state_df()
 
 # ---------------------------- Visualización con Plotly ----------------------------
-# Reducir espacio superior con CSS personalizado
-st.markdown("""
-<style>
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 0rem;
-    }
-    h1 {
-        margin-top: 0rem;
-        margin-bottom: 0.5rem;
-    }
-</style>
-""", unsafe_allow_html=True)
-
 st.title("Fuxion TI")
 
 working = get_state_df().copy()
@@ -466,15 +452,11 @@ main_col, control_col = st.columns([2.5, 1])
 
 # ---------------------------- Columna de Controles (derecha) ----------------------------
 with control_col:
-    # Label personalizado para Proyecto
-    st.markdown("<p style='font-size: 18px; font-weight: bold; margin-bottom: 5px;'>Proyecto</p>", unsafe_allow_html=True)
-    
     # Combobox para seleccionar proyecto
     selected_project = st.selectbox(
-        "Proyecto",
+        "📋 Proyecto",
         options=["Selecciona un proyecto..."] + all_projects,
-        key="project_selector",
-        label_visibility="collapsed"
+        key="project_selector"
     )
     
     # Obtener los datos del proyecto seleccionado
@@ -612,25 +594,6 @@ with control_col:
     
     st.markdown("---")
     st.info("💡 **Tip:** Selecciona un proyecto y ajusta sus valores con los sliders")
-    
-    # Botón de descarga CSV
-    st.markdown("---")
-    _df_export = _df.copy()
-    
-    # Asegurar que Label esté primero, seguido de las columnas de ejes, luego el resto
-    cols_order = ["Label"]
-    if x_label in _df_export.columns and x_label != "Label":
-        cols_order.append(x_label)
-    if y_label in _df_export.columns and y_label != "Label" and y_label != x_label:
-        cols_order.append(y_label)
-    # Agregar todas las demás columnas que no están en cols_order
-    for col in _df_export.columns:
-        if col not in cols_order:
-            cols_order.append(col)
-    _df_export = _df_export[cols_order]
-    
-    csv = _df_export.to_csv(index=False).encode("utf-8")
-    st.download_button("📥 Descargar CSV", csv, file_name="cuadrante_mapa_calor.csv", mime="text/csv", use_container_width=True)
 
 # ---------------------------- Columna del Gráfico (izquierda) ----------------------------
 with main_col:
@@ -822,3 +785,24 @@ with main_col:
 
     # Información sobre controles
     st.info("💡 **Controles:** Pasa el cursor sobre las burbujas para ver detalles | Usa la rueda del mouse para zoom | Arrastra para mover la vista | Doble clic para resetear")
+
+
+# ---------------------------- Exportación ----------------------------
+
+# Exportar CSV con los datos actuales
+_df_export = _df.copy()
+
+# Asegurar que Label esté primero, seguido de las columnas de ejes, luego el resto
+cols_order = ["Label"]
+if x_label in _df_export.columns and x_label != "Label":
+    cols_order.append(x_label)
+if y_label in _df_export.columns and y_label != "Label" and y_label != x_label:
+    cols_order.append(y_label)
+# Agregar todas las demás columnas que no están en cols_order
+for col in _df_export.columns:
+    if col not in cols_order:
+        cols_order.append(col)
+_df_export = _df_export[cols_order]
+
+csv = _df_export.to_csv(index=False).encode("utf-8")
+st.download_button("📥 Descargar CSV", csv, file_name="cuadrante_mapa_calor.csv", mime="text/csv")
