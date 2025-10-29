@@ -82,17 +82,17 @@ def get_heatmap_color(value, min_val, max_val):
 
 def get_heatmap_opacity(value, min_val, max_val):
     """Retorna la opacidad basada en el valor normalizado.
-    Valores bajos (amarillo) = más transparente (0.5)
-    Valores altos (rojo) = más opaco (0.95)
+    Valores bajos (amarillo) = más transparente (0.3)
+    Valores altos (rojo) = más opaco (0.7)
     """
     if max_val == min_val:
-        return 0.75  # Opacidad media
+        return 0.5  # Opacidad media
     
     # Normalizar el valor entre 0 y 1
     normalized = (value - min_val) / (max_val - min_val)
     
-    # Mapear a opacidad entre 0.5 (bajo) y 0.95 (alto)
-    opacity = 0.5 + (normalized * 0.45)
+    # Mapear a opacidad entre 0.3 (bajo) y 0.7 (alto)
+    opacity = 0.3 + (normalized * 0.4)
     
     return opacity
 
@@ -193,7 +193,7 @@ if has_label and has_xy:
             """
             st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
             st.sidebar.caption("Los colores representan el valor de " + size_col)
-            st.sidebar.caption("💧 Transparencia: Bajo (50%) → Alto (95%)")
+            st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
         else:
             base["Radius_px"] = 25.0
             st.sidebar.info(f"Todos los valores de {size_col} son iguales")
@@ -386,7 +386,7 @@ else:
             """
             st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
             st.sidebar.caption("Los colores representan el valor de " + size_col)
-            st.sidebar.caption("💧 Transparencia: Bajo (50%) → Alto (95%)")
+            st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
         else:
             base["Radius_px"] = 25.0
             st.sidebar.info(f"Todos los valores de {size_col} son iguales")
