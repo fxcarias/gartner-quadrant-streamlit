@@ -96,6 +96,50 @@ def get_heatmap_opacity(value, min_val, max_val):
     
     return opacity
 
+def normalize_to_0_100(values):
+    """Normaliza una serie de valores al rango 0-100.
+    Retorna la serie normalizada y los valores min/max originales.
+    """
+    values = pd.Series(values)
+    min_val = values.min()
+    max_val = values.max()
+    
+    if max_val == min_val:
+        # Todos los valores son iguales, retornar 50 (medio del rango)
+        normalized = pd.Series([50.0] * len(values), index=values.index)
+        return normalized, min_val, max_val
+    
+    # Normalizar a 0-100
+    normalized = ((values - min_val) / (max_val - min_val)) * 100
+    
+    return normalized, min_val, max_val
+
+def value_to_category(value):
+    """Convierte un valor numérico a una categoría descriptiva basada en el rango -120 a 120.
+    Las categorías son: Sin Valor, Muy Bajo, Bajo, Medio, Alto, Muy Alto
+    """
+    if pd.isna(value):
+        return "--"
+    
+    try:
+        val = float(value)
+    except (ValueError, TypeError):
+        return str(value)
+    
+    # Definir los límites de las categorías basados en el rango -120 a 120
+    if val < -60:
+        return "Sin Valor"
+    elif val < -20:
+        return "Muy Bajo"
+    elif val < 20:
+        return "Bajo"
+    elif val < 60:
+        return "Medio"
+    elif val < 100:
+        return "Alto"
+    else:  # val >= 100
+        return "Muy Alto"
+
 # ---------------------------- Sidebar: carga de datos ----------------------------
 st.sidebar.header("Datos")
 
@@ -165,38 +209,40 @@ if has_label and has_xy:
     else:
         size_col = None
     
+    # Guardar size_col en session_state para uso posterior
+    st.session_state.size_col = size_col
+    
     base = df_raw[base_cols].copy()
     
     # Calcular Radius_px basado en la columna de tamaño o usar valor fijo/existente
     if size_col and size_col in base.columns:
-        # Escalar valores de la columna de tamaño a radios entre 10 y 50 pixels
+        # Normalizar valores a 0-100 primero
         size_values = base[size_col]
-        min_val = size_values.min()
-        max_val = size_values.max()
-        if max_val > min_val:
-            base["Radius_px"] = 10 + ((size_values - min_val) / (max_val - min_val)) * 40
-            st.sidebar.caption(f"📊 Rango de {size_col}: {min_val:.1f} - {max_val:.1f}")
-            st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
-            
-            # Leyenda del mapa de calor
-            st.sidebar.markdown("---")
-            st.sidebar.markdown("**🎨 Mapa de Calor:**")
-            heatmap_html = """
-            <div style="display: flex; align-items: center; margin: 5px 0;">
-                <div style="flex: 1; height: 20px; background: linear-gradient(to right, #FFFF99, #FFFF00, #FFAA00, #FF6600, #FF0000, #BB0000); border-radius: 3px;"></div>
-            </div>
-            <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
-                <span>🟡 Bajo</span>
-                <span>🟠 Medio</span>
-                <span>🔴 Alto</span>
-            </div>
-            """
-            st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
-            st.sidebar.caption("Los colores representan el valor de " + size_col)
-            st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
-        else:
-            base["Radius_px"] = 25.0
-            st.sidebar.info(f"Todos los valores de {size_col} son iguales")
+        normalized_values, min_val, max_val = normalize_to_0_100(size_values)
+        
+        # Escalar valores normalizados (0-100) a radios entre 10 y 50 pixels
+        base["Radius_px"] = 10 + (normalized_values / 100) * 40
+        
+        st.sidebar.caption(f"📊 Rango original de {size_col}: {min_val:.1f} - {max_val:.1f}")
+        st.sidebar.caption(f"📈 Normalizado: 0 - 100")
+        st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
+        
+        # Leyenda del mapa de calor
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**🎨 Mapa de Calor:**")
+        heatmap_html = """
+        <div style="display: flex; align-items: center; margin: 5px 0;">
+            <div style="flex: 1; height: 20px; background: linear-gradient(to right, #FFFF99, #FFFF00, #FFAA00, #FF6600, #FF0000, #BB0000); border-radius: 3px;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
+            <span>🟡 0</span>
+            <span>🟠 50</span>
+            <span>🔴 100</span>
+        </div>
+        """
+        st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
+        st.sidebar.caption("Los colores representan el valor normalizado (0-100) de " + size_col)
+        st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
     elif "Radius_px" not in base.columns:
         # Soporte para CSV antiguos con Font_px y Width_px
         if "Font_px" in df_raw.columns:
@@ -240,37 +286,40 @@ elif has_label:
         else:
             size_col = None
         
+        # Guardar size_col en session_state para uso posterior
+        st.session_state.size_col = size_col
+        
         base = df_raw[base_cols].rename(columns={x_col:"X", y_col:"Y"}).copy()
         
         # Calcular Radius_px basado en la columna de tamaño o usar valor fijo
         if size_col and size_col in base.columns:
-            # Escalar valores de la columna de tamaño a radios entre 10 y 50 pixels
+            # Normalizar valores a 0-100 primero
             size_values = base[size_col]
-            min_val = size_values.min()
-            max_val = size_values.max()
-            if max_val > min_val:
-                base["Radius_px"] = 10 + ((size_values - min_val) / (max_val - min_val)) * 40
-                st.sidebar.caption(f"📊 Rango de {size_col}: {min_val:.1f} - {max_val:.1f}")
-                st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
-                
-                # Leyenda del mapa de calor
-                st.sidebar.markdown("---")
-                st.sidebar.markdown("**🎨 Mapa de Calor:**")
-                heatmap_html = """
-                <div style="display: flex; align-items: center; margin: 5px 0;">
-                    <div style="flex: 1; height: 20px; background: linear-gradient(to right, #00b300, #80ff00, #ffff00, #ff9900, #ff0000, #cc0000); border-radius: 3px;"></div>
-                </div>
-                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
-                    <span>🟢 Bajo</span>
-                    <span>🟡 Medio</span>
-                    <span>🔴 Alto</span>
-                </div>
-                """
-                st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
-                st.sidebar.caption("Los colores representan el valor de " + size_col)
-            else:
-                base["Radius_px"] = 25.0
-                st.sidebar.info(f"Todos los valores de {size_col} son iguales")
+            normalized_values, min_val, max_val = normalize_to_0_100(size_values)
+            
+            # Escalar valores normalizados (0-100) a radios entre 10 y 50 pixels
+            base["Radius_px"] = 10 + (normalized_values / 100) * 40
+            
+            st.sidebar.caption(f"📊 Rango original de {size_col}: {min_val:.1f} - {max_val:.1f}")
+            st.sidebar.caption(f"📈 Normalizado: 0 - 100")
+            st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
+            
+            # Leyenda del mapa de calor
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("**🎨 Mapa de Calor:**")
+            heatmap_html = """
+            <div style="display: flex; align-items: center; margin: 5px 0;">
+                <div style="flex: 1; height: 20px; background: linear-gradient(to right, #FFFF99, #FFFF00, #FFAA00, #FF6600, #FF0000, #BB0000); border-radius: 3px;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
+                <span>🟡 0</span>
+                <span>🟠 50</span>
+                <span>🔴 100</span>
+            </div>
+            """
+            st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
+            st.sidebar.caption("Los colores representan el valor normalizado (0-100) de " + size_col)
+            st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
         else:
             base["Radius_px"] = 20.0
         
@@ -302,36 +351,40 @@ elif has_label:
         else:
             size_col = None
         
+        # Guardar size_col en session_state para uso posterior
+        st.session_state.size_col = size_col
+        
         base = _df[base_cols].dropna().copy().rename(columns={label_col:"Label", x_col:"X", y_col:"Y"})
         
         # Calcular Radius_px basado en la columna de tamaño
         if size_col and size_col in base.columns:
+            # Normalizar valores a 0-100 primero
             size_values = base[size_col]
-            min_val = size_values.min()
-            max_val = size_values.max()
-            if max_val > min_val:
-                base["Radius_px"] = 10 + ((size_values - min_val) / (max_val - min_val)) * 40
-                st.sidebar.caption(f"📊 Rango de {size_col}: {min_val:.1f} - {max_val:.1f}")
-                st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
-                
-                # Leyenda del mapa de calor
-                st.sidebar.markdown("---")
-                st.sidebar.markdown("**🎨 Mapa de Calor:**")
-                heatmap_html = """
-                <div style="display: flex; align-items: center; margin: 5px 0;">
-                    <div style="flex: 1; height: 20px; background: linear-gradient(to right, #00b300, #80ff00, #ffff00, #ff9900, #ff0000, #cc0000); border-radius: 3px;"></div>
-                </div>
-                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
-                    <span>🟢 Bajo</span>
-                    <span>🟡 Medio</span>
-                    <span>🔴 Alto</span>
-                </div>
-                """
-                st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
-                st.sidebar.caption("Los colores representan el valor de " + size_col)
-            else:
-                base["Radius_px"] = 25.0
-                st.sidebar.info(f"Todos los valores de {size_col} son iguales")
+            normalized_values, min_val, max_val = normalize_to_0_100(size_values)
+            
+            # Escalar valores normalizados (0-100) a radios entre 10 y 50 pixels
+            base["Radius_px"] = 10 + (normalized_values / 100) * 40
+            
+            st.sidebar.caption(f"📊 Rango original de {size_col}: {min_val:.1f} - {max_val:.1f}")
+            st.sidebar.caption(f"📈 Normalizado: 0 - 100")
+            st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
+            
+            # Leyenda del mapa de calor
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("**🎨 Mapa de Calor:**")
+            heatmap_html = """
+            <div style="display: flex; align-items: center; margin: 5px 0;">
+                <div style="flex: 1; height: 20px; background: linear-gradient(to right, #FFFF99, #FFFF00, #FFAA00, #FF6600, #FF0000, #BB0000); border-radius: 3px;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
+                <span>🟡 0</span>
+                <span>🟠 50</span>
+                <span>🔴 100</span>
+            </div>
+            """
+            st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
+            st.sidebar.caption("Los colores representan el valor normalizado (0-100) de " + size_col)
+            st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
         else:
             base["Radius_px"] = 20.0
         
@@ -358,6 +411,9 @@ else:
         size_col = size_col_selected
     else:
         size_col = None
+    
+    # Guardar size_col en session_state para uso posterior
+    st.session_state.size_col = size_col
     
     base = _df[base_cols].dropna().copy().rename(columns={x_col:"X", y_col:"Y"})
     
@@ -414,10 +470,216 @@ if is_state_csv:
     st.sidebar.selectbox("Eje Y", _y_opts, index=_y_idx, disabled=True, key="ui_y_col")
 
 # ---------------------------- Estado robusto ----------------------------
-sig = hashlib.md5(base.to_csv(index=False).encode("utf-8")).hexdigest()
+# Guardar base original ANTES de aplicar filtros (para usar después)
+base_original = base.copy()
+_df_original = _df.copy()
+
+# Calcular firma del estado basada en base original (sin filtros)
+# Esto evita que el estado se resetee cuando cambia el filtro
+sig = hashlib.md5(base_original.to_csv(index=False).encode("utf-8")).hexdigest()
 if st.session_state.get("__last_source_sig__") != sig:
     st.session_state.pop("data", None)
     st.session_state["__last_source_sig__"] = sig
+
+# ---------------------------- Filtro por Tamaño de Burbuja ----------------------------
+def apply_filter_to_data(min_val, max_val):
+    """Aplica el filtro a los datos y actualiza el estado"""
+    global _df, base
+    
+    if size_col_for_filter and size_col_for_filter in _df_original.columns:
+        # Aplicar filtro al DataFrame original
+        _df_filtered = _df_original[_df_original[size_col_for_filter] >= min_val].copy()
+        _df_filtered = _df_filtered[_df_filtered[size_col_for_filter] <= max_val].copy()
+        
+        # Si hay datos después de filtrar, aplicar el filtro
+        if len(_df_filtered) > 0:
+            # Actualizar _df con los datos filtrados
+            _df = _df_filtered.copy()
+            
+            # Filtrar base usando los Labels que están en _df filtrado
+            labels_in_filtered = set(_df['Label'].values)
+            base = base_original[base_original['Label'].isin(labels_in_filtered)].copy()
+            
+            # Recalcular Radius_px si es necesario
+            if size_col_for_filter in base.columns:
+                size_values = base[size_col_for_filter]
+                normalized_values, min_val_norm, max_val_norm = normalize_to_0_100(size_values)
+                base["Radius_px"] = 10 + (normalized_values / 100) * 40
+            
+            # Actualizar el estado con los datos filtrados, preservando las posiciones X, Y existentes
+            if "data" in st.session_state and len(base) > 0:
+                # Obtener el estado actual para preservar X, Y
+                state_data_current = st.session_state.data.copy()
+                
+                # Crear nuevo estado desde base filtrado
+                state_data_new = base.copy()
+                
+                # Preservar las posiciones X, Y del estado actual si existen
+                if 'Label' in state_data_current.columns and 'X' in state_data_current.columns and 'Y' in state_data_current.columns:
+                    # Crear un diccionario con las posiciones actuales
+                    positions_map = {}
+                    for _, row in state_data_current.iterrows():
+                        label = row['Label']
+                        if label in labels_in_filtered:
+                            x_val = row.get('X', 0)
+                            y_val = row.get('Y', 0)
+                            # Si no hay valores válidos, usar los de base
+                            if pd.isna(x_val) or x_val == 0:
+                                base_row = base[base['Label'] == label]
+                                if len(base_row) > 0:
+                                    x_val = base_row['X'].values[0]
+                            if pd.isna(y_val) or y_val == 0:
+                                base_row = base[base['Label'] == label]
+                                if len(base_row) > 0:
+                                    y_val = base_row['Y'].values[0]
+                            positions_map[label] = {'X': x_val, 'Y': y_val}
+                    
+                    # Aplicar las posiciones preservadas
+                    for label, pos in positions_map.items():
+                        mask = state_data_new['Label'] == label
+                        if mask.any():
+                            state_data_new.loc[mask, 'X'] = pos['X']
+                            state_data_new.loc[mask, 'Y'] = pos['Y']
+                
+                # Asegurar que Radius_px esté presente
+                if "Radius_px" not in state_data_new.columns:
+                    state_data_new["Radius_px"] = 20.0
+                
+                # Actualizar el estado solo si hay datos
+                if len(state_data_new) > 0:
+                    st.session_state.data = state_data_new
+        else:
+            # Si no hay datos después de filtrar, mantener datos originales
+            _df = _df_original.copy()
+            base = base_original.copy()
+
+def apply_all_filters():
+    """Aplica todos los filtros activos (tamaño y Status)"""
+    global _df, base
+    
+    # Empezar con el DataFrame original
+    _df_filtered = _df_original.copy()
+    
+    # Aplicar filtro por tamaño si existe
+    if size_col_for_filter and size_col_for_filter in _df_original.columns and pd.api.types.is_numeric_dtype(_df_original[size_col_for_filter]):
+        filter_key = "slider_filter_size"
+        if filter_key in st.session_state:
+            min_val, max_val = st.session_state[filter_key]
+            _df_filtered = _df_filtered[_df_filtered[size_col_for_filter] >= min_val].copy()
+            _df_filtered = _df_filtered[_df_filtered[size_col_for_filter] <= max_val].copy()
+    
+    # Aplicar filtro por Status si existe
+    status_filter_key = "filter_status_values"
+    if status_filter_key in st.session_state and "Status" in _df_filtered.columns:
+        selected_statuses = st.session_state[status_filter_key]
+        # Si está vacío, mostrar todos (no filtrar)
+        if len(selected_statuses) > 0:
+            all_statuses = sorted(_df_original["Status"].dropna().unique().tolist())
+            # Solo filtrar si no están todos seleccionados
+            if set(selected_statuses) != set(all_statuses):
+                _df_filtered = _df_filtered[_df_filtered["Status"].isin(selected_statuses)].copy()
+    
+    # Si hay datos después de filtrar, aplicar el filtro
+    if len(_df_filtered) > 0:
+        # Actualizar _df con los datos filtrados
+        _df = _df_filtered.copy()
+        
+        # Filtrar base usando los Labels que están en _df filtrado
+        labels_in_filtered = set(_df['Label'].values)
+        base = base_original[base_original['Label'].isin(labels_in_filtered)].copy()
+        
+        # Recalcular Radius_px si es necesario
+        if size_col_for_filter and size_col_for_filter in base.columns:
+            size_values = base[size_col_for_filter]
+            normalized_values, min_val_norm, max_val_norm = normalize_to_0_100(size_values)
+            base["Radius_px"] = 10 + (normalized_values / 100) * 40
+        
+        # Actualizar el estado con los datos filtrados, preservando las posiciones X, Y existentes
+        if "data" in st.session_state and len(base) > 0:
+            # Obtener el estado actual para preservar X, Y
+            state_data_current = st.session_state.data.copy()
+            
+            # Crear nuevo estado desde base filtrado
+            state_data_new = base.copy()
+            
+            # Preservar las posiciones X, Y del estado actual si existen
+            if 'Label' in state_data_current.columns and 'X' in state_data_current.columns and 'Y' in state_data_current.columns:
+                # Crear un diccionario con las posiciones actuales
+                positions_map = {}
+                for _, row in state_data_current.iterrows():
+                    label = row['Label']
+                    if label in labels_in_filtered:
+                        x_val = row.get('X', 0)
+                        y_val = row.get('Y', 0)
+                        # Si no hay valores válidos, usar los de base
+                        if pd.isna(x_val) or x_val == 0:
+                            base_row = base[base['Label'] == label]
+                            if len(base_row) > 0:
+                                x_val = base_row['X'].values[0]
+                        if pd.isna(y_val) or y_val == 0:
+                            base_row = base[base['Label'] == label]
+                            if len(base_row) > 0:
+                                y_val = base_row['Y'].values[0]
+                        positions_map[label] = {'X': x_val, 'Y': y_val}
+                
+                # Aplicar las posiciones preservadas
+                for label, pos in positions_map.items():
+                    mask = state_data_new['Label'] == label
+                    if mask.any():
+                        state_data_new.loc[mask, 'X'] = pos['X']
+                        state_data_new.loc[mask, 'Y'] = pos['Y']
+            
+            # Asegurar que Radius_px esté presente
+            if "Radius_px" not in state_data_new.columns:
+                state_data_new["Radius_px"] = 20.0
+            
+            # Actualizar el estado solo si hay datos
+            if len(state_data_new) > 0:
+                st.session_state.data = state_data_new
+    else:
+        # Si no hay datos después de filtrar, mantener datos originales
+        _df = _df_original.copy()
+        base = base_original.copy()
+
+# Obtener la columna de tamaño desde session_state
+size_col_for_filter = st.session_state.get('size_col', None)
+
+# Inicializar filtro si hay una columna de tamaño
+if size_col_for_filter and size_col_for_filter in _df_original.columns and pd.api.types.is_numeric_dtype(_df_original[size_col_for_filter]):
+    # Obtener valores min/max del DataFrame original
+    col_min = float(_df_original[size_col_for_filter].min())
+    col_max = float(_df_original[size_col_for_filter].max())
+    
+    # Usar session_state para mantener los valores del filtro
+    filter_key = "slider_filter_size"
+    
+    # Inicializar valores por defecto si no existen
+    if filter_key not in st.session_state:
+        st.session_state[filter_key] = (col_min, col_max)
+    
+    # Obtener valores actuales del slider
+    current_filter_value = st.session_state.get(filter_key, (col_min, col_max))
+    
+    # Asegurar que los valores estén en el rango válido
+    current_min = max(col_min, min(col_max, current_filter_value[0]))
+    current_max = min(col_max, max(col_min, current_filter_value[1]))
+    
+    # Si los valores están fuera de rango, resetearlos
+    if current_min < col_min or current_max > col_max or current_min > current_max:
+        current_min = col_min
+        current_max = col_max
+        st.session_state[filter_key] = (current_min, current_max)
+    
+# Inicializar filtro por Status si existe la columna
+if "Status" in _df_original.columns:
+    status_filter_key = "filter_status_values"
+    if status_filter_key not in st.session_state:
+        # Inicializar con todos los valores únicos
+        all_statuses = sorted(_df_original["Status"].dropna().unique().tolist())
+        st.session_state[status_filter_key] = all_statuses
+
+# Aplicar todos los filtros inicialmente
+apply_all_filters()
 
 def _init_state_from_base(_base: pd.DataFrame) -> None:
     df_init = _base.copy()
@@ -433,10 +695,11 @@ def _init_state_from_base(_base: pd.DataFrame) -> None:
 
 def get_state_df() -> pd.DataFrame:
     if "data" not in st.session_state:
-        _init_state_from_base(base)
+        # Inicializar con base_original (sin filtros)
+        _init_state_from_base(base_original)
     return st.session_state.data
 
-# Inicializa ya
+# Inicializa el estado con base original (antes de filtros)
 _ = get_state_df()
 
 # ---------------------------- Visualización con Plotly ----------------------------
@@ -485,54 +748,162 @@ with control_col:
     
     st.markdown("---")
     
-    # Definir las métricas que siempre deben mostrarse
-    metrics = ["Costo", "Impacto", "Esfuerzo", "Variable"]
+    # Obtener métricas dinámicamente desde las columnas disponibles
+    # Excluir columnas técnicas y de ejes
+    exclude_cols = {'Label', 'X', 'Y', 'Radius_px', 'Font_px', 'Width_px'}
     
-    # Mostrar tarjetas de métricas en 2 columnas (2x2)
-    for row_idx in range(2):  # 2 filas
-        metric_cols = st.columns(2)  # 2 columnas
-        for col_idx in range(2):  # 2 métricas por fila
-            idx = row_idx * 2 + col_idx
-            if idx < len(metrics):
-                metric = metrics[idx]
-                with metric_cols[col_idx]:
-                    # Obtener valor o mostrar "--"
-                    if not selected_row.empty and metric in selected_row.columns:
-                        val = selected_row[metric].values[0]
-                        if metric == "Costo":
-                            display_val = f"{val:.0f}"
+    # Priorizar "Costo" si existe, luego las demás columnas numéricas y de texto
+    available_metrics = [col for col in _df.columns if col not in exclude_cols]
+    
+    # Priorizar "Costo" al inicio si existe
+    if 'Costo' in available_metrics:
+        available_metrics.remove('Costo')
+        metrics = ['Costo'] + available_metrics
+    else:
+        metrics = available_metrics
+    
+    # Si no hay métricas, no mostrar nada
+    if len(metrics) > 0:
+        # Calcular número de filas necesarias (2 columnas)
+        num_cols_display = 2
+        num_rows = (len(metrics) + num_cols_display - 1) // num_cols_display
+        
+        # Mostrar tarjetas de métricas en grid dinámico
+        for row_idx in range(num_rows):
+            metric_cols = st.columns(num_cols_display)
+            for col_idx in range(num_cols_display):
+                idx = row_idx * num_cols_display + col_idx
+                if idx < len(metrics):
+                    metric = metrics[idx]
+                    with metric_cols[col_idx]:
+                        # Obtener valor y convertirlo a categoría
+                        if not selected_row.empty and metric in selected_row.columns:
+                            val = selected_row[metric].values[0]
+                            # Convertir a categoría si es numérico, sino mostrar como string
+                            if pd.api.types.is_numeric_dtype(_df[metric]):
+                                display_val = value_to_category(val)
+                            else:
+                                display_val = str(val)
                         else:
-                            display_val = f"{val:.2f}"
-                    else:
-                        display_val = "--"
-                    
-                    st.markdown(f"""
-                    <div style="
-                        background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.95) 100%);
-                        padding: 12px 10px;
-                        border-radius: 10px;
-                        text-align: center;
-                        box-shadow: 0 2px 8px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.06);
-                        border: 1px solid rgba(226,232,240,0.8);
-                        transition: all 0.3s ease;
-                        margin-bottom: 10px;
-                    ">
-                        <p style="
-                            color: #64748b;
-                            margin: 0;
-                            font-size: 11px;
-                            font-weight: 600;
-                            text-transform: uppercase;
-                            letter-spacing: 0.5px;
-                        ">{metric}</p>
-                        <p style="
-                            color: #1e293b;
-                            margin: 4px 0 0 0;
-                            font-size: 18px;
-                            font-weight: 700;
-                        ">{display_val}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
+                            display_val = "--"
+                        
+                        st.markdown(f"""
+                        <div style="
+                            background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.95) 100%);
+                            padding: 12px 10px;
+                            border-radius: 10px;
+                            text-align: center;
+                            box-shadow: 0 2px 8px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.06);
+                            border: 1px solid rgba(226,232,240,0.8);
+                            transition: all 0.3s ease;
+                            margin-bottom: 10px;
+                        ">
+                            <p style="
+                                color: #64748b;
+                                margin: 0;
+                                font-size: 11px;
+                                font-weight: 600;
+                                text-transform: uppercase;
+                                letter-spacing: 0.5px;
+                            ">{metric}</p>
+                            <p style="
+                                color: #1e293b;
+                                margin: 4px 0 0 0;
+                                font-size: 18px;
+                                font-weight: 700;
+                            ">{display_val}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+    
+    # ---------------------------- Filtro por Tamaño ----------------------------
+    if size_col_for_filter and size_col_for_filter in _df_original.columns and pd.api.types.is_numeric_dtype(_df_original[size_col_for_filter]):
+        st.markdown("---")
+        st.markdown("**🔍 Filtro por Tamaño:**")
+        
+        # Obtener valores min/max del DataFrame original
+        col_min = float(_df_original[size_col_for_filter].min())
+        col_max = float(_df_original[size_col_for_filter].max())
+        
+        # Usar session_state para mantener los valores del filtro
+        filter_key = "slider_filter_size"
+        
+        # Obtener valores actuales del slider
+        current_filter_value = st.session_state.get(filter_key, (col_min, col_max))
+        
+        # Asegurar que los valores estén en el rango válido
+        current_min = max(col_min, min(col_max, current_filter_value[0]))
+        current_max = min(col_max, max(col_min, current_filter_value[1]))
+        
+        # Si los valores están fuera de rango, resetearlos
+        if current_min < col_min or current_max > col_max or current_min > current_max:
+            current_min = col_min
+            current_max = col_max
+            st.session_state[filter_key] = (current_min, current_max)
+        
+        min_val, max_val = st.slider(
+            f"Rango de {size_col_for_filter}",
+            min_value=col_min,
+            max_value=col_max,
+            value=(current_min, current_max),
+            key=filter_key
+        )
+        
+        # Aplicar filtro cuando cambie
+        if min_val != current_min or max_val != current_max:
+            apply_all_filters()
+    
+    # ---------------------------- Filtro por Status ----------------------------
+    if "Status" in _df_original.columns:
+        st.markdown("---")
+        st.markdown("**🔍 Filtro por Status:**")
+        
+        # Obtener todos los valores únicos de Status
+        all_statuses = sorted(_df_original["Status"].dropna().unique().tolist())
+        
+        # Usar session_state para mantener los valores seleccionados
+        status_filter_key = "filter_status_values"
+        
+        # Inicializar si no existe
+        if status_filter_key not in st.session_state:
+            st.session_state[status_filter_key] = all_statuses
+        
+        # Obtener valores actuales
+        current_selected = st.session_state.get(status_filter_key, all_statuses)
+        
+        # Si current_selected está vacío, inicializar con todos
+        if not current_selected or len(current_selected) == 0:
+            current_selected = all_statuses
+            # Solo modificar session_state si no existe el widget aún
+            if status_filter_key not in st.session_state:
+                st.session_state[status_filter_key] = all_statuses
+        
+        # Multiselect para seleccionar Status
+        # El multiselect actualiza automáticamente st.session_state[status_filter_key]
+        selected_statuses = st.multiselect(
+            "Seleccionar Status",
+            options=all_statuses,
+            default=current_selected,
+            key=status_filter_key
+        )
+        
+        # Si no hay selección (lista vacía), tratar como "mostrar todos"
+        # apply_all_filters manejará esto correctamente
+        
+        # Aplicar filtro cuando cambie (compara sets para ignorar orden)
+        if set(selected_statuses) != set(current_selected):
+            # Si se deseleccionaron todos, el multiselect guardará lista vacía en session_state
+            # apply_all_filters tratará lista vacía como "mostrar todos"
+            apply_all_filters()
+        
+        # Mostrar información solo si hay filtro activo
+        if len(selected_statuses) > 0 and len(selected_statuses) < len(all_statuses):
+            st.info(f"📊 Mostrando {len(_df)} de {len(_df_original)} registros")
+            if st.button("🔄 Limpiar Filtro Status", key="clear_status_filter", use_container_width=True):
+                # Resetear el filtro eliminando la key del session_state
+                # En el próximo rerun, se inicializará con todos los valores
+                if status_filter_key in st.session_state:
+                    del st.session_state[status_filter_key]
+                st.rerun()
     
     st.markdown("---")
     st.markdown("**Ajustar Valores:**")
@@ -540,23 +911,35 @@ with control_col:
     # Determinar si hay proyecto seleccionado
     is_project_selected = selected_project != "Selecciona un proyecto..."
     
+    # Obtener la columna de tamaño desde session_state
+    current_size_col = st.session_state.get('size_col', None)
+    
     # Obtener valores actuales (o valores por defecto si no hay selección)
     if is_project_selected:
         current_x = working.loc[working['Label'] == selected_project, 'X'].values[0]
         current_y = working.loc[working['Label'] == selected_project, 'Y'].values[0]
-        current_cost = _df.loc[_df['Label'] == selected_project, 'Costo'].values[0] if 'Costo' in _df.columns else 0
+        if current_size_col and current_size_col in _df.columns:
+            current_size_value = _df.loc[_df['Label'] == selected_project, current_size_col].values[0]
+        else:
+            current_size_value = 0.0
     else:
         current_x = 0.0
         current_y = 0.0
-        current_cost = 0.0
+        current_size_value = 0.0
     
-    # Determinar rango del slider de costo basado en los datos
-    if 'Costo' in _df.columns:
-        min_cost_slider = _df['Costo'].min()
-        max_cost_slider = _df['Costo'].max()
+    # Determinar rango del slider de tamaño basado en los datos
+    if current_size_col and current_size_col in _df.columns:
+        min_size_slider = _df[current_size_col].min()
+        max_size_slider = _df[current_size_col].max()
+        # Usar un step más pequeño si el rango es muy grande
+        if max_size_slider - min_size_slider > 1000:
+            step_size = (max_size_slider - min_size_slider) / 1000
+        else:
+            step_size = 0.01 if max_size_slider - min_size_slider < 100 else 1.0
     else:
-        min_cost_slider = 0
-        max_cost_slider = 100
+        min_size_slider = 0
+        max_size_slider = 100
+        step_size = 1.0
     
     # Sliders verticales (uno debajo del otro)
     new_x = st.slider(
@@ -579,15 +962,19 @@ with control_col:
         disabled=not is_project_selected
     )
     
-    new_cost = st.slider(
-        "💰 Costo",
-        min_value=float(min_cost_slider),
-        max_value=float(max_cost_slider),
-        value=float(current_cost),
-        step=1.0,
-        key="slider_cost",
-        disabled=not is_project_selected
-    )
+    # Slider genérico para la columna de tamaño (solo si hay una columna seleccionada)
+    if current_size_col and current_size_col in _df.columns:
+        new_size_value = st.slider(
+            f"💰 {current_size_col}",
+            min_value=float(min_size_slider),
+            max_value=float(max_size_slider),
+            value=float(current_size_value),
+            step=float(step_size),
+            key="slider_size_col",
+            disabled=not is_project_selected
+        )
+    else:
+        new_size_value = current_size_value
     
     # Actualizar los valores si cambiaron (solo si hay proyecto seleccionado)
     if is_project_selected:
@@ -599,16 +986,14 @@ with control_col:
             st.session_state.data.loc[st.session_state.data['Label'] == selected_project, 'X'] = new_x
             st.session_state.data.loc[st.session_state.data['Label'] == selected_project, 'Y'] = new_y
         
-        if 'Costo' in _df.columns and new_cost != current_cost:
-            # Actualizar _df (que contiene Costo)
-            _df.loc[_df['Label'] == selected_project, 'Costo'] = new_cost
-            # Recalcular Radius_px basado en el nuevo costo
-            size_values = _df['Costo']
-            min_val = size_values.min()
-            max_val = size_values.max()
-            if max_val > min_val:
-                working['Radius_px'] = 10 + ((size_values - min_val) / (max_val - min_val)) * 40
-                st.session_state.data['Radius_px'] = working['Radius_px']
+        if current_size_col and current_size_col in _df.columns and new_size_value != current_size_value:
+            # Actualizar _df (que contiene la columna de tamaño)
+            _df.loc[_df['Label'] == selected_project, current_size_col] = new_size_value
+            # Recalcular Radius_px basado en el nuevo valor (normalizando a 0-100 primero)
+            size_values = _df[current_size_col]
+            normalized_values, min_val, max_val = normalize_to_0_100(size_values)
+            working['Radius_px'] = 10 + (normalized_values / 100) * 40
+            st.session_state.data['Radius_px'] = working['Radius_px']
     
     st.markdown("---")
     st.info("💡 **Tip:** Selecciona un proyecto y ajusta sus valores con los sliders")
@@ -645,18 +1030,19 @@ with main_col:
     min_radius = min(radii) if radii else 10
     max_radius = max(radii) if radii else 50
 
-    # Obtener valores reales de Costo para la leyenda
-    cost_values = []
-    if 'Costo' in _df.columns:
+    # Obtener valores reales de la columna de tamaño para la leyenda
+    size_col_for_legend = st.session_state.get('size_col', None)
+    size_values_for_legend = []
+    if size_col_for_legend and size_col_for_legend in _df.columns:
         for _, r in working.iterrows():
-            val = _df.loc[_df['Label'] == r['Label'], 'Costo'].values
+            val = _df.loc[_df['Label'] == r['Label'], size_col_for_legend].values
             if len(val) > 0:
-                cost_values.append(val[0])
-        min_cost = min(cost_values) if cost_values else 0
-        max_cost = max(cost_values) if cost_values else 100
+                size_values_for_legend.append(val[0])
+        min_size = min(size_values_for_legend) if size_values_for_legend else 0
+        max_size = max(size_values_for_legend) if size_values_for_legend else 100
     else:
-        min_cost = min_radius
-        max_cost = max_radius
+        min_size = 0
+        max_size = 100
 
     # Preparar datos para Plotly
     colors = []
@@ -681,9 +1067,11 @@ with main_col:
         # Crear tooltip con formato personalizado
         hover_info = [f"<b>{r['Label']}</b>"]
 
-        # Agregar todas las columnas (excepto Label y Costo, que irá al final)
+        # Agregar todas las columnas (excepto Label y la columna de tamaño, que irá al final)
         # Excluir columnas técnicas internas
-        exclude_cols = ['Label', 'Radius_px', 'Font_px', 'Width_px', 'Costo']
+        exclude_cols = ['Label', 'Radius_px', 'Font_px', 'Width_px']
+        if size_col_for_legend:
+            exclude_cols.append(size_col_for_legend)
 
         for col in _df.columns:
             if col not in exclude_cols:
@@ -695,11 +1083,15 @@ with main_col:
                     else:
                         hover_info.append(f"{col}: {val[0]}")
 
-        # Agregar Costo al final si existe
-        if 'Costo' in _df.columns:
-            val = _df.loc[_df['Label'] == r['Label'], 'Costo'].values
+        # Agregar la columna de tamaño al final si existe
+        if size_col_for_legend and size_col_for_legend in _df.columns:
+            val = _df.loc[_df['Label'] == r['Label'], size_col_for_legend].values
             if len(val) > 0:
-                hover_info.append(f"Costo: {val[0]:.2f}")
+                # Formatear según si es numérico o no
+                if pd.api.types.is_numeric_dtype(_df[size_col_for_legend]):
+                    hover_info.append(f"{size_col_for_legend}: {val[0]:.2f}")
+                else:
+                    hover_info.append(f"{size_col_for_legend}: {val[0]}")
 
         hover_texts.append("<br>".join(hover_info))
 
@@ -709,15 +1101,44 @@ with main_col:
     # Definir rangos fijos de -120 a 120
     x_abs_max = 120
     y_abs_max = 120
-
-    # Agregar líneas de ejes en x=0 y y=0
-    fig.add_shape(type="line",
-        x0=-120, y0=0, x1=120, y1=0,
-        line=dict(color="#9CA3AF", width=1, dash="dash"))
-
+    
+    # Dividir el espacio en categorías descriptivas (6 categorías)
+    # Para negativos: Sin valor (-120 a -60), Muy bajo (-60 a 0)
+    # Para positivos: Bajo (0 a 40), Medio (40 a 80), Alto (80 a 120)
+    
+    # Posiciones de las categorías (6 categorías) - ajustadas para rango -120 a 120
+    category_positions = [-100, -60, -20, 20, 60, 100]
+    # Etiquetas descriptivas: 3 negativas y 3 positivas
+    category_labels = ["Sin Valor", "Muy Bajo", "Bajo", "Medio", "Alto", "Muy Alto"]
+    
+    # Agregar líneas divisorias entre categorías
+    # Línea principal en x=0 y y=0 (división entre negativos y positivos)
     fig.add_shape(type="line",
         x0=0, y0=-120, x1=0, y1=120,
-        line=dict(color="#9CA3AF", width=1, dash="dash"))
+        line=dict(color="#9CA3AF", width=1.5, dash="dash"),
+        layer="below"
+    )
+    
+    fig.add_shape(type="line",
+        x0=-120, y0=0, x1=120, y1=0,
+        line=dict(color="#9CA3AF", width=1.5, dash="dash"),
+        layer="below"
+    )
+    
+    # Líneas divisorias secundarias en los puntos de división
+    for divider in [-80, -40, 40, 80]:
+        # Línea vertical
+        fig.add_shape(type="line",
+            x0=divider, y0=-120, x1=divider, y1=120,
+            line=dict(color="#D1D5DB", width=0.8, dash="dot"),
+            layer="below"
+        )
+        # Línea horizontal
+        fig.add_shape(type="line",
+            x0=-120, y0=divider, x1=120, y1=divider,
+            line=dict(color="#D1D5DB", width=0.8, dash="dot"),
+            layer="below"
+        )
 
     # Crear una colorscale personalizada para la leyenda
     colorscale_values = [
@@ -730,12 +1151,25 @@ with main_col:
     ]
 
     # Agregar las burbujas con colorscale
-    for idx, row in working.iterrows():
-        # Calcular el valor normalizado para la colorbar
-        radius = float(row.get("Radius_px", 20.0))
-        if radius < 5:
-            radius = 20.0
-        normalized_value = (radius - min_radius) / (max_radius - min_radius) if max_radius > min_radius else 0.5
+    # Usar enumerate para obtener índice posicional en lugar del índice del DataFrame
+    for list_idx, (df_idx, row) in enumerate(working.iterrows()):
+        # Calcular el valor normalizado para la colorbar basado en los valores originales de la columna de tamaño
+        if size_col_for_legend and size_col_for_legend in _df.columns:
+            # Obtener el valor original de la columna de tamaño
+            size_val = _df.loc[_df['Label'] == row['Label'], size_col_for_legend].values
+            if len(size_val) > 0:
+                original_value = size_val[0]
+                # Normalizar entre min_size y max_size para el colorbar (0-1)
+                normalized_value = (original_value - min_size) / (max_size - min_size) if max_size > min_size else 0.5
+                normalized_value = max(0, min(1, normalized_value))  # Asegurar que esté en rango 0-1
+            else:
+                normalized_value = 0.5
+        else:
+            # Si no hay columna de tamaño, usar el radius
+            radius = float(row.get("Radius_px", 20.0))
+            if radius < 5:
+                radius = 20.0
+            normalized_value = (radius - min_radius) / (max_radius - min_radius) if max_radius > min_radius else 0.5
 
         # Verificar si esta burbuja es la seleccionada
         is_selected = (selected_project != "Selecciona un proyecto..." and row['Label'] == selected_project)
@@ -750,47 +1184,48 @@ with main_col:
             border_color = '#ffffff'
             # Si hay una selección, hacer las demás burbujas más transparentes
             if selected_project != "Selecciona un proyecto...":
-                bubble_opacity = opacities[idx] * 0.4  # Reducir opacidad al 40%
+                # Usar list_idx en lugar de idx para acceder a las listas
+                bubble_opacity = opacities[list_idx] * 0.4 if list_idx < len(opacities) else 0.5  # Reducir opacidad al 40%
             else:
-                bubble_opacity = opacities[idx]
+                bubble_opacity = opacities[list_idx] if list_idx < len(opacities) else 0.5
 
         fig.add_trace(go.Scatter(
             x=[row['X']],
             y=[row['Y']],
             mode='markers',
             marker=dict(
-                size=sizes[idx],
+                size=sizes[list_idx] if list_idx < len(sizes) else 40,
                 color=[normalized_value],  # Usar valor normalizado para la colorbar
                 colorscale=colorscale_values,
                 cmin=0,
                 cmax=1,
                 opacity=bubble_opacity,
                 line=dict(width=border_width, color=border_color),
-                showscale=True if idx == 0 else False,  # Mostrar colorbar solo en la primera burbuja
+                showscale=True if list_idx == 0 else False,  # Mostrar colorbar solo en la primera burbuja
                 colorbar=dict(
-                    title="Costo" if idx == 0 else None,
+                    title=(size_col_for_legend if size_col_for_legend else "Tamaño") if list_idx == 0 else None,
                     titleside="right",
                     tickmode="linear",
                     tick0=0,
                     dtick=0.25,
                     tickvals=[0, 0.25, 0.5, 0.75, 1.0],
                     ticktext=[
-                        f"{min_cost:.0f}",
-                        f"{min_cost + (max_cost - min_cost) * 0.25:.0f}",
-                        f"{min_cost + (max_cost - min_cost) * 0.5:.0f}",
-                        f"{min_cost + (max_cost - min_cost) * 0.75:.0f}",
-                        f"{max_cost:.0f}"
-                    ] if idx == 0 else None,
+                        f"{min_size:.2f}",
+                        f"{min_size + (max_size - min_size) * 0.25:.2f}",
+                        f"{min_size + (max_size - min_size) * 0.5:.2f}",
+                        f"{min_size + (max_size - min_size) * 0.75:.2f}",
+                        f"{max_size:.2f}"
+                    ] if list_idx == 0 else None,
                     len=0.4,
                     thickness=15,
                     x=1.02
-                ) if idx == 0 else None
+                ) if list_idx == 0 else None
             ),
-            hovertemplate=hover_texts[idx] + '<extra></extra>',
+            hovertemplate=hover_texts[list_idx] + '<extra></extra>' if list_idx < len(hover_texts) else '<extra></extra>',
             showlegend=False
         ))
 
-    # Configurar layout
+    # Configurar layout con categorías descriptivas
     fig.update_layout(
         width=1100,
         height=1100,  # Hacer el gráfico cuadrado para mantener la proporción 1:1
@@ -801,7 +1236,12 @@ with main_col:
             gridcolor='#E5E7EB',
             range=[-120, 120],
             showgrid=True,
-            dtick=20  # Marcas cada 20 unidades
+            tickmode="array",
+            tickvals=category_positions,  # Posiciones de las categorías
+            ticktext=category_labels,  # Etiquetas descriptivas
+            titlefont=dict(size=14),
+            side="bottom",  # Título en la parte inferior
+            tickfont=dict(size=11)
         ),
         yaxis=dict(
             title=y_label,
@@ -809,9 +1249,12 @@ with main_col:
             gridcolor='#E5E7EB',
             range=[-120, 120],
             showgrid=True,
-            dtick=20,  # Marcas cada 20 unidades
+            tickmode="array",
+            tickvals=category_positions,  # Posiciones de las categorías
+            ticktext=category_labels,  # Etiquetas descriptivas
             scaleanchor="x",
-            scaleratio=1
+            scaleratio=1,
+            tickfont=dict(size=11)
         ),
         hovermode='closest',
         margin=dict(l=60, r=60, t=40, b=60)

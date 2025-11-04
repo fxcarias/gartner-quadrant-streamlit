@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re, hashlib
-from streamlit_drawable_canvas import st_canvas
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="Fuxion TI", layout="wide")
+st.set_page_config(page_title="Fuxion TI", layout="wide", initial_sidebar_state="collapsed")
 
 # ---------------------------- Datos de ejemplo ----------------------------
 @st.cache_data
@@ -45,6 +45,100 @@ PALETTE = [
     "#59a14f","#e15759","#76b7b2","#edc948","#b07aa1","#ff9da6",
     "#9c755f","#bab0ab"
 ]
+
+# Paleta de colores tipo mapa de calor (amarillo → naranja → rojo)
+# Inspirada en mapas de calor geográficos
+HEATMAP_PALETTE = [
+    "#FFFF99",  # Amarillo muy claro
+    "#FFFF66",  # Amarillo claro
+    "#FFFF33",  # Amarillo
+    "#FFFF00",  # Amarillo brillante
+    "#FFEE00",  # Amarillo-naranja claro
+    "#FFDD00",  # Amarillo-naranja
+    "#FFCC00",  # Naranja amarillento
+    "#FFAA00",  # Naranja claro
+    "#FF8800",  # Naranja
+    "#FF6600",  # Naranja oscuro
+    "#FF4400",  # Naranja-rojo
+    "#FF2200",  # Rojo-naranja
+    "#FF0000",  # Rojo
+    "#DD0000",  # Rojo oscuro
+    "#BB0000",  # Rojo muy oscuro
+]
+
+def get_heatmap_color(value, min_val, max_val):
+    """Retorna un color de la paleta heatmap basado en el valor normalizado."""
+    if max_val == min_val:
+        return HEATMAP_PALETTE[len(HEATMAP_PALETTE) // 2]  # Color medio
+    
+    # Normalizar el valor entre 0 y 1
+    normalized = (value - min_val) / (max_val - min_val)
+    
+    # Mapear a un índice de la paleta
+    index = int(normalized * (len(HEATMAP_PALETTE) - 1))
+    index = max(0, min(len(HEATMAP_PALETTE) - 1, index))  # Asegurar que esté en rango
+    
+    return HEATMAP_PALETTE[index]
+
+def get_heatmap_opacity(value, min_val, max_val):
+    """Retorna la opacidad basada en el valor normalizado.
+    Valores bajos (amarillo) = más transparente (0.3)
+    Valores altos (rojo) = más opaco (0.7)
+    """
+    if max_val == min_val:
+        return 0.5  # Opacidad media
+    
+    # Normalizar el valor entre 0 y 1
+    normalized = (value - min_val) / (max_val - min_val)
+    
+    # Mapear a opacidad entre 0.3 (bajo) y 0.7 (alto)
+    opacity = 0.3 + (normalized * 0.4)
+    
+    return opacity
+
+def normalize_to_0_100(values):
+    """Normaliza una serie de valores al rango 0-100.
+    Retorna la serie normalizada y los valores min/max originales.
+    """
+    values = pd.Series(values)
+    min_val = values.min()
+    max_val = values.max()
+    
+    if max_val == min_val:
+        # Todos los valores son iguales, retornar 50 (medio del rango)
+        normalized = pd.Series([50.0] * len(values), index=values.index)
+        return normalized, min_val, max_val
+    
+    # Normalizar a 0-100
+    normalized = ((values - min_val) / (max_val - min_val)) * 100
+    
+    return normalized, min_val, max_val
+
+def value_to_category(value):
+    """Convierte un valor numérico a una categoría descriptiva basada en el rango -120 a 120.
+    Las categorías son: Sin Valor, Muy Bajo, Bajo, Medio, Alto, Muy Alto
+    """
+    if pd.isna(value):
+        return "--"
+    
+    try:
+        val = float(value)
+    except (ValueError, TypeError):
+        return str(value)
+    
+    # Definir los límites de las categorías basados en el rango -120 a 120
+    if val < -60:
+        return "Sin Valor"
+    elif val < -20:
+        return "Muy Bajo"
+    elif val < 20:
+        return "Bajo"
+    elif val < 60:
+        return "Medio"
+    elif val < 100:
+        return "Alto"
+    else:  # val >= 100
+        return "Muy Alto"
 
 # ---------------------------- Sidebar: carga de datos ----------------------------
 st.sidebar.header("Datos")
@@ -88,16 +182,74 @@ _num_cols_all  = list(_df.select_dtypes(include=["number"]).columns)
 # Detección de CSV de estado/exportado por la app
 has_label = "Label" in _df.columns
 has_xy = {"X","Y"}.issubset(_df.columns)
-num_cols_all = [c for c in _num_cols_all if c not in {"Font_px","Width_px"}]
+num_cols_all = [c for c in _num_cols_all if c not in {"Font_px","Width_px","Radius_px"}]
+
+# Detectar si hay columnas numéricas para tamaño de burbuja
+size_candidates = [c for c in num_cols_all if c not in {"X", "Y"}]
 
 # Elegir base y nombres de ejes visibles
 if has_label and has_xy:
     # CSV estado clásico
     df_raw = _df.copy()
-    if "Font_px" not in df_raw.columns: df_raw["Font_px"] = 14.0
-    if "Width_px" not in df_raw.columns:
-        df_raw["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in df_raw["Label"]]
-    base = df_raw[["Label","X","Y","Font_px","Width_px"]].copy()
+    
+    # Selector para columna de tamaño de burbuja (también para CSVs de estado)
+    st.sidebar.subheader("Tamaño de Burbujas")
+    size_col_options = ["Ninguno (tamaño fijo)"] + size_candidates
+    default_size_idx = 0
+    if "Costo" in size_candidates:
+        default_size_idx = size_candidates.index("Costo") + 1
+    
+    size_col_selected = st.sidebar.selectbox("Columna para tamaño", size_col_options, index=default_size_idx, key="size_col_selector_state")
+    
+    # Construir base con columnas necesarias
+    base_cols = ["Label", "X", "Y"]
+    if size_col_selected != "Ninguno (tamaño fijo)" and size_col_selected in df_raw.columns:
+        base_cols.append(size_col_selected)
+        size_col = size_col_selected
+    else:
+        size_col = None
+    
+    # Guardar size_col en session_state para uso posterior
+    st.session_state.size_col = size_col
+    
+    base = df_raw[base_cols].copy()
+    
+    # Calcular Radius_px basado en la columna de tamaño o usar valor fijo/existente
+    if size_col and size_col in base.columns:
+        # Normalizar valores a 0-100 primero
+        size_values = base[size_col]
+        normalized_values, min_val, max_val = normalize_to_0_100(size_values)
+        
+        # Escalar valores normalizados (0-100) a radios entre 10 y 50 pixels
+        base["Radius_px"] = 10 + (normalized_values / 100) * 40
+        
+        st.sidebar.caption(f"📊 Rango original de {size_col}: {min_val:.1f} - {max_val:.1f}")
+        st.sidebar.caption(f"📈 Normalizado: 0 - 100")
+        st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
+        
+        # Leyenda del mapa de calor
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**🎨 Mapa de Calor:**")
+        heatmap_html = """
+        <div style="display: flex; align-items: center; margin: 5px 0;">
+            <div style="flex: 1; height: 20px; background: linear-gradient(to right, #FFFF99, #FFFF00, #FFAA00, #FF6600, #FF0000, #BB0000); border-radius: 3px;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
+            <span>🟡 0</span>
+            <span>🟠 50</span>
+            <span>🔴 100</span>
+        </div>
+        """
+        st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
+        st.sidebar.caption("Los colores representan el valor normalizado (0-100) de " + size_col)
+        st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
+    elif "Radius_px" not in base.columns:
+        # Soporte para CSV antiguos con Font_px y Width_px
+        if "Font_px" in df_raw.columns:
+            base["Radius_px"] = df_raw["Font_px"]
+        else:
+            base["Radius_px"] = 20.0
+    
     x_label, y_label = "X", "Y"
     is_state_csv = True
 elif has_label:
@@ -114,11 +266,63 @@ elif has_label:
         x_col = st.sidebar.selectbox("Eje X", axis_candidates, index=default_x_idx, key="x_col_selector")
         y_col = st.sidebar.selectbox("Eje Y", axis_candidates, index=default_y_idx, key="y_col_selector")
         
+        # Selector para columna de tamaño de burbuja
+        st.sidebar.subheader("Tamaño de Burbujas")
+        size_col_options = ["Ninguno (tamaño fijo)"] + size_candidates
+        # Buscar "Costo" como opción por defecto
+        default_size_idx = 0
+        if "Costo" in size_candidates:
+            default_size_idx = size_candidates.index("Costo") + 1
+        
+        size_col_selected = st.sidebar.selectbox("Columna para tamaño", size_col_options, index=default_size_idx, key="size_col_selector")
+        
         df_raw = _df.copy()
-        if "Font_px" not in df_raw.columns: df_raw["Font_px"] = 14.0
-        if "Width_px" not in df_raw.columns:
-            df_raw["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in df_raw["Label"]]
-        base = df_raw[["Label", x_col, y_col, "Font_px", "Width_px"]].rename(columns={x_col:"X", y_col:"Y"}).copy()
+        
+        # Construir base con columnas necesarias
+        base_cols = ["Label", x_col, y_col]
+        if size_col_selected != "Ninguno (tamaño fijo)" and size_col_selected in df_raw.columns:
+            base_cols.append(size_col_selected)
+            size_col = size_col_selected
+        else:
+            size_col = None
+        
+        # Guardar size_col en session_state para uso posterior
+        st.session_state.size_col = size_col
+        
+        base = df_raw[base_cols].rename(columns={x_col:"X", y_col:"Y"}).copy()
+        
+        # Calcular Radius_px basado en la columna de tamaño o usar valor fijo
+        if size_col and size_col in base.columns:
+            # Normalizar valores a 0-100 primero
+            size_values = base[size_col]
+            normalized_values, min_val, max_val = normalize_to_0_100(size_values)
+            
+            # Escalar valores normalizados (0-100) a radios entre 10 y 50 pixels
+            base["Radius_px"] = 10 + (normalized_values / 100) * 40
+            
+            st.sidebar.caption(f"📊 Rango original de {size_col}: {min_val:.1f} - {max_val:.1f}")
+            st.sidebar.caption(f"📈 Normalizado: 0 - 100")
+            st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
+            
+            # Leyenda del mapa de calor
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("**🎨 Mapa de Calor:**")
+            heatmap_html = """
+            <div style="display: flex; align-items: center; margin: 5px 0;">
+                <div style="flex: 1; height: 20px; background: linear-gradient(to right, #FFFF99, #FFFF00, #FFAA00, #FF6600, #FF0000, #BB0000); border-radius: 3px;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
+                <span>🟡 0</span>
+                <span>🟠 50</span>
+                <span>🔴 100</span>
+            </div>
+            """
+            st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
+            st.sidebar.caption("Los colores representan el valor normalizado (0-100) de " + size_col)
+            st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
+        else:
+            base["Radius_px"] = 20.0
+        
         x_label, y_label = x_col, y_col
         is_state_csv = False  # No es CSV de estado, es CSV normal con selección de ejes
     else:
@@ -131,9 +335,59 @@ elif has_label:
         label_col = st.sidebar.selectbox("Columna etiqueta", _text_cols_all, index=0)
         x_col = st.sidebar.selectbox("Eje X", _num_cols_all, index=min(1, len(_num_cols_all)-1))
         y_col = st.sidebar.selectbox("Eje Y", _num_cols_all, index=min(0, len(_num_cols_all)-1))
-        base = _df[[label_col, x_col, y_col]].dropna().copy().rename(columns={label_col:"Label", x_col:"X", y_col:"Y"})
-        base["Font_px"] = 14.0
-        base["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in base["Label"]]
+        
+        # Selector para columna de tamaño de burbuja
+        st.sidebar.subheader("Tamaño de Burbujas")
+        size_col_options = ["Ninguno (tamaño fijo)"] + size_candidates
+        default_size_idx = 0
+        if "Costo" in size_candidates:
+            default_size_idx = size_candidates.index("Costo") + 1
+        size_col_selected = st.sidebar.selectbox("Columna para tamaño", size_col_options, index=default_size_idx, key="size_col_selector2")
+        
+        base_cols = [label_col, x_col, y_col]
+        if size_col_selected != "Ninguno (tamaño fijo)" and size_col_selected in _df.columns:
+            base_cols.append(size_col_selected)
+            size_col = size_col_selected
+        else:
+            size_col = None
+        
+        # Guardar size_col en session_state para uso posterior
+        st.session_state.size_col = size_col
+        
+        base = _df[base_cols].dropna().copy().rename(columns={label_col:"Label", x_col:"X", y_col:"Y"})
+        
+        # Calcular Radius_px basado en la columna de tamaño
+        if size_col and size_col in base.columns:
+            # Normalizar valores a 0-100 primero
+            size_values = base[size_col]
+            normalized_values, min_val, max_val = normalize_to_0_100(size_values)
+            
+            # Escalar valores normalizados (0-100) a radios entre 10 y 50 pixels
+            base["Radius_px"] = 10 + (normalized_values / 100) * 40
+            
+            st.sidebar.caption(f"📊 Rango original de {size_col}: {min_val:.1f} - {max_val:.1f}")
+            st.sidebar.caption(f"📈 Normalizado: 0 - 100")
+            st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
+            
+            # Leyenda del mapa de calor
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("**🎨 Mapa de Calor:**")
+            heatmap_html = """
+            <div style="display: flex; align-items: center; margin: 5px 0;">
+                <div style="flex: 1; height: 20px; background: linear-gradient(to right, #FFFF99, #FFFF00, #FFAA00, #FF6600, #FF0000, #BB0000); border-radius: 3px;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
+                <span>🟡 0</span>
+                <span>🟠 50</span>
+                <span>🔴 100</span>
+            </div>
+            """
+            st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
+            st.sidebar.caption("Los colores representan el valor normalizado (0-100) de " + size_col)
+            st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
+        else:
+            base["Radius_px"] = 20.0
+        
         x_label, y_label = x_col, y_col
         is_state_csv = False
 else:
@@ -142,9 +396,59 @@ else:
     _text_cols_all = list(dict.fromkeys(["Label"] + _text_cols_all))
     x_col = st.sidebar.selectbox("Eje X", _num_cols_all, index=min(1, len(_num_cols_all)-1))
     y_col = st.sidebar.selectbox("Eje Y", _num_cols_all, index=min(0, len(_num_cols_all)-1))
-    base = _df[["Label", x_col, y_col]].dropna().copy().rename(columns={x_col:"X", y_col:"Y"})
-    base["Font_px"] = 14.0
-    base["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in base["Label"]]
+    
+    # Selector para columna de tamaño de burbuja
+    st.sidebar.subheader("Tamaño de Burbujas")
+    size_col_options = ["Ninguno (tamaño fijo)"] + size_candidates
+    default_size_idx = 0
+    if "Costo" in size_candidates:
+        default_size_idx = size_candidates.index("Costo") + 1
+    size_col_selected = st.sidebar.selectbox("Columna para tamaño", size_col_options, index=default_size_idx, key="size_col_selector3")
+    
+    base_cols = ["Label", x_col, y_col]
+    if size_col_selected != "Ninguno (tamaño fijo)" and size_col_selected in _df.columns:
+        base_cols.append(size_col_selected)
+        size_col = size_col_selected
+    else:
+        size_col = None
+    
+    # Guardar size_col en session_state para uso posterior
+    st.session_state.size_col = size_col
+    
+    base = _df[base_cols].dropna().copy().rename(columns={x_col:"X", y_col:"Y"})
+    
+    # Calcular Radius_px basado en la columna de tamaño
+    if size_col and size_col in base.columns:
+        size_values = base[size_col]
+        min_val = size_values.min()
+        max_val = size_values.max()
+        if max_val > min_val:
+            base["Radius_px"] = 10 + ((size_values - min_val) / (max_val - min_val)) * 40
+            st.sidebar.caption(f"📊 Rango de {size_col}: {min_val:.1f} - {max_val:.1f}")
+            st.sidebar.caption(f"🔵 Tamaño burbujas: 10px - 50px")
+            
+            # Leyenda del mapa de calor
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("**🎨 Mapa de Calor:**")
+            heatmap_html = """
+            <div style="display: flex; align-items: center; margin: 5px 0;">
+                <div style="flex: 1; height: 20px; background: linear-gradient(to right, #FFFF99, #FFFF00, #FFAA00, #FF6600, #FF0000, #BB0000); border-radius: 3px;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
+                <span>🟡 Bajo</span>
+                <span>🟠 Medio</span>
+                <span>🔴 Alto</span>
+            </div>
+            """
+            st.sidebar.markdown(heatmap_html, unsafe_allow_html=True)
+            st.sidebar.caption("Los colores representan el valor de " + size_col)
+            st.sidebar.caption("💧 Transparencia: Bajo (30%) → Alto (70%)")
+        else:
+            base["Radius_px"] = 25.0
+            st.sidebar.info(f"Todos los valores de {size_col} son iguales")
+    else:
+        base["Radius_px"] = 20.0
+    
     x_label, y_label = x_col, y_col
     is_state_csv = False
 
@@ -166,231 +470,666 @@ if is_state_csv:
     st.sidebar.selectbox("Eje Y", _y_opts, index=_y_idx, disabled=True, key="ui_y_col")
 
 # ---------------------------- Estado robusto ----------------------------
-sig = hashlib.md5(base.to_csv(index=False).encode("utf-8")).hexdigest()
+# Guardar base original ANTES de aplicar filtros (para usar después)
+base_original = base.copy()
+_df_original = _df.copy()
+
+# Calcular firma del estado basada en base original (sin filtros)
+# Esto evita que el estado se resetee cuando cambia el filtro
+sig = hashlib.md5(base_original.to_csv(index=False).encode("utf-8")).hexdigest()
 if st.session_state.get("__last_source_sig__") != sig:
     st.session_state.pop("data", None)
     st.session_state["__last_source_sig__"] = sig
 
+# ---------------------------- Filtro por Tamaño de Burbuja ----------------------------
+def apply_filter_to_data(min_val, max_val):
+    """Aplica el filtro a los datos y actualiza el estado"""
+    global _df, base
+    
+    if size_col_for_filter and size_col_for_filter in _df_original.columns:
+        # Aplicar filtro al DataFrame original
+        _df_filtered = _df_original[_df_original[size_col_for_filter] >= min_val].copy()
+        _df_filtered = _df_filtered[_df_filtered[size_col_for_filter] <= max_val].copy()
+        
+        # Si hay datos después de filtrar, aplicar el filtro
+        if len(_df_filtered) > 0:
+            # Actualizar _df con los datos filtrados
+            _df = _df_filtered.copy()
+            
+            # Filtrar base usando los Labels que están en _df filtrado
+            labels_in_filtered = set(_df['Label'].values)
+            base = base_original[base_original['Label'].isin(labels_in_filtered)].copy()
+            
+            # Recalcular Radius_px si es necesario
+            if size_col_for_filter in base.columns:
+                size_values = base[size_col_for_filter]
+                normalized_values, min_val_norm, max_val_norm = normalize_to_0_100(size_values)
+                base["Radius_px"] = 10 + (normalized_values / 100) * 40
+            
+            # Actualizar el estado con los datos filtrados, preservando las posiciones X, Y existentes
+            if "data" in st.session_state and len(base) > 0:
+                # Obtener el estado actual para preservar X, Y
+                state_data_current = st.session_state.data.copy()
+                
+                # Crear nuevo estado desde base filtrado
+                state_data_new = base.copy()
+                
+                # Preservar las posiciones X, Y del estado actual si existen
+                if 'Label' in state_data_current.columns and 'X' in state_data_current.columns and 'Y' in state_data_current.columns:
+                    # Crear un diccionario con las posiciones actuales
+                    positions_map = {}
+                    for _, row in state_data_current.iterrows():
+                        label = row['Label']
+                        if label in labels_in_filtered:
+                            x_val = row.get('X', 0)
+                            y_val = row.get('Y', 0)
+                            # Si no hay valores válidos, usar los de base
+                            if pd.isna(x_val) or x_val == 0:
+                                base_row = base[base['Label'] == label]
+                                if len(base_row) > 0:
+                                    x_val = base_row['X'].values[0]
+                            if pd.isna(y_val) or y_val == 0:
+                                base_row = base[base['Label'] == label]
+                                if len(base_row) > 0:
+                                    y_val = base_row['Y'].values[0]
+                            positions_map[label] = {'X': x_val, 'Y': y_val}
+                    
+                    # Aplicar las posiciones preservadas
+                    for label, pos in positions_map.items():
+                        mask = state_data_new['Label'] == label
+                        if mask.any():
+                            state_data_new.loc[mask, 'X'] = pos['X']
+                            state_data_new.loc[mask, 'Y'] = pos['Y']
+                
+                # Asegurar que Radius_px esté presente
+                if "Radius_px" not in state_data_new.columns:
+                    state_data_new["Radius_px"] = 20.0
+                
+                # Actualizar el estado solo si hay datos
+                if len(state_data_new) > 0:
+                    st.session_state.data = state_data_new
+        else:
+            # Si no hay datos después de filtrar, mantener datos originales
+            _df = _df_original.copy()
+            base = base_original.copy()
+
+# Obtener la columna de tamaño desde session_state
+size_col_for_filter = st.session_state.get('size_col', None)
+
+# Inicializar filtro si hay una columna de tamaño
+if size_col_for_filter and size_col_for_filter in _df_original.columns and pd.api.types.is_numeric_dtype(_df_original[size_col_for_filter]):
+    # Obtener valores min/max del DataFrame original
+    col_min = float(_df_original[size_col_for_filter].min())
+    col_max = float(_df_original[size_col_for_filter].max())
+    
+    # Usar session_state para mantener los valores del filtro
+    filter_key = "slider_filter_size"
+    
+    # Inicializar valores por defecto si no existen
+    if filter_key not in st.session_state:
+        st.session_state[filter_key] = (col_min, col_max)
+    
+    # Obtener valores actuales del slider
+    current_filter_value = st.session_state.get(filter_key, (col_min, col_max))
+    
+    # Asegurar que los valores estén en el rango válido
+    current_min = max(col_min, min(col_max, current_filter_value[0]))
+    current_max = min(col_max, max(col_min, current_filter_value[1]))
+    
+    # Si los valores están fuera de rango, resetearlos
+    if current_min < col_min or current_max > col_max or current_min > current_max:
+        current_min = col_min
+        current_max = col_max
+        st.session_state[filter_key] = (current_min, current_max)
+    
+    # Aplicar filtro inicialmente
+    apply_filter_to_data(current_min, current_max)
+else:
+    # Si no hay filtro, usar datos originales
+    _df = _df_original.copy()
+    base = base_original.copy()
+
 def _init_state_from_base(_base: pd.DataFrame) -> None:
     df_init = _base.copy()
-    if "Font_px" not in df_init.columns:
-        df_init["Font_px"] = 14.0
-    df_init["Font_px"] = pd.to_numeric(df_init["Font_px"], errors="coerce").fillna(14.0).clip(6, 400)
-    if "Width_px" not in df_init.columns:
-        df_init["Width_px"] = [max(80.0, min(400.0, 0.6*14.0*max(6, len(str(lbl)))+16)) for lbl in df_init["Label"]]
-    df_init["Width_px"] = pd.to_numeric(df_init["Width_px"], errors="coerce").fillna(180.0).clip(40, 2000)
+    # Inicializar Radius_px para las burbujas
+    if "Radius_px" not in df_init.columns:
+        # Si existe Font_px del CSV anterior, usarlo como base para el radio
+        if "Font_px" in df_init.columns:
+            df_init["Radius_px"] = df_init["Font_px"]
+        else:
+            df_init["Radius_px"] = 20.0
+    df_init["Radius_px"] = pd.to_numeric(df_init["Radius_px"], errors="coerce").fillna(20.0).clip(5, 200)
     st.session_state.data = df_init
 
 def get_state_df() -> pd.DataFrame:
     if "data" not in st.session_state:
-        _init_state_from_base(base)
+        # Inicializar con base_original (sin filtros)
+        _init_state_from_base(base_original)
     return st.session_state.data
 
-# Inicializa ya
+# Inicializa el estado con base original (antes de filtros)
 _ = get_state_df()
 
-# ---------------------------- Canvas ----------------------------
-st.title("Fuxion TI")
+# ---------------------------- Visualización con Plotly ----------------------------
+# Reducir espacio superior con CSS personalizado
+st.markdown("""
+<style>
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 0rem;
+    }
+    h1 {
+        margin-top: 0rem;
+        margin-bottom: 0.5rem;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-CANVAS_W, CANVAS_H, PAD = 1100, 700, 60
+st.title("Fuxion TI")
 
 working = get_state_df().copy()
 
-# Obtener signature del conjunto de datos actual (cambia cuando se carga nuevo CSV)
-sig = st.session_state.get('__last_source_sig__', 'default')
+# Lista de todos los proyectos para el combobox
+all_projects = working['Label'].tolist()
 
-# Calcular rangos de los ejes solo la primera vez para este conjunto de datos
-# Esto asegura que las posiciones sean consistentes incluso después de mover objetos
-ranges_key = f"__canvas_ranges_{sig}__"
+# Crear layout de dos columnas: gráfico a la izquierda, controles a la derecha
+main_col, control_col = st.columns([2.5, 1])
 
-if ranges_key not in st.session_state:
-    # Primera vez: calcular y guardar rangos basados en los datos iniciales
-    x_abs_max = float(max(abs(working["X"].min()), abs(working["X"].max()))) or 1.0
-    y_abs_max = float(max(abs(working["Y"].min()), abs(working["Y"].max()))) or 1.0
-    st.session_state[ranges_key] = {"x_abs_max": x_abs_max, "y_abs_max": y_abs_max}
-else:
-    # Reruns: usar los rangos guardados
-    ranges = st.session_state[ranges_key]
-    x_abs_max = ranges["x_abs_max"]
-    y_abs_max = ranges["y_abs_max"]
-
-x_disp_min, x_disp_max = -x_abs_max, x_abs_max
-y_disp_min, y_disp_max = -y_abs_max, y_abs_max
-
-def x_to_px(x):
-    return PAD + (x - x_disp_min) / (x_disp_max - x_disp_min) * (CANVAS_W - 2*PAD)
-
-def y_to_px(y):
-    # invertido (arriba mayor)
-    return PAD + (y_disp_max - y) / (y_disp_max - y_disp_min) * (CANVAS_H - 2*PAD)
-
-def px_to_x(px):
-    return x_disp_min + (px - PAD) / (CANVAS_W - 2*PAD) * (x_disp_max - x_disp_min)
-
-def px_to_y(py):
-    return y_disp_max - (py - PAD) / (CANVAS_H - 2*PAD) * (y_disp_max - y_disp_min)
-
-def _apply_canvas_to_df(canvas_json, df_state: pd.DataFrame) -> pd.DataFrame:
-    """Devuelve un DF con X,Y,Font_px,Width_px tal como se ven en el lienzo."""
-    df_upd = df_state.copy()
-    if not canvas_json or "objects" not in canvas_json:
-        return df_upd
-    df_upd = df_upd.set_index("Label")
-    objs = canvas_json.get("objects", [])
-    obj_map = {}
-    for o in objs:
-        if o.get("type") != "textbox":
-            continue
-        name = o.get("name", "")
-        txt = o.get("text", "")
-        if isinstance(name, str) and name.startswith("lbl::"):
-            lab = name.split("lbl::", 1)[1]
-            obj_map[lab] = o
-        elif isinstance(txt, str) and txt in df_upd.index and txt not in obj_map:
-            obj_map[txt] = o
+# ---------------------------- Columna de Controles (derecha) ----------------------------
+with control_col:
+    # Label personalizado para Proyecto
+    st.markdown("<p style='font-size: 18px; font-weight: bold; margin-bottom: 5px;'>Proyecto</p>", unsafe_allow_html=True)
     
-    for lab in df_upd.index.tolist():
-        o = obj_map.get(lab)
-        if not o:
-            continue
-        
-        # Obtener coordenadas actuales del canvas
-        left = float(o.get("left", np.nan))
-        top = float(o.get("top", np.nan))
-        
-        # Convertir a coordenadas del gráfico
-        if not np.isnan(left) and not np.isnan(top):
-            df_upd.loc[lab, "X"] = px_to_x(left)
-            df_upd.loc[lab, "Y"] = px_to_y(top)
-        
-        # Leer tamaños y escalas del canvas
-        font_sz = float(o.get("fontSize", df_upd.loc[lab, "Font_px"])) if "Font_px" in df_upd.columns else float(o.get("fontSize", 14.0))
-        width_obj = float(o.get("width", df_upd.loc[lab, "Width_px"])) if "Width_px" in df_upd.columns else float(o.get("width", 180.0))
-        sx = float(o.get("scaleX", 1.0) or 1.0)
-        sy = float(o.get("scaleY", 1.0) or 1.0)
-        
-        # Calcular tamaños efectivos (fontSize * scale, width * scale)
-        eff_font = float(np.clip(font_sz * max(sx, sy), 6.0, 400.0))
-        eff_width = float(np.clip(width_obj * sx, 40.0, 2000.0))
-        
-        df_upd.loc[lab, "Font_px"] = float(np.round(eff_font, 1))
-        df_upd.loc[lab, "Width_px"] = float(np.round(eff_width, 1))
+    # Combobox para seleccionar proyecto
+    selected_project = st.selectbox(
+        "Proyecto",
+        options=["Selecciona un proyecto..."] + all_projects,
+        key="project_selector",
+        label_visibility="collapsed"
+    )
     
-    return df_upd.reset_index()
+    # Obtener los datos del proyecto seleccionado
+    if selected_project != "Selecciona un proyecto...":
+        selected_row = _df[_df['Label'] == selected_project]
+    else:
+        selected_row = pd.DataFrame()
+    
+    st.markdown("---")
+    
+    # Obtener métricas dinámicamente desde las columnas disponibles
+    # Excluir columnas técnicas y de ejes
+    exclude_cols = {'Label', 'X', 'Y', 'Radius_px', 'Font_px', 'Width_px'}
+    
+    # Priorizar "Costo" si existe, luego las demás columnas numéricas y de texto
+    available_metrics = [col for col in _df.columns if col not in exclude_cols]
+    
+    # Priorizar "Costo" al inicio si existe
+    if 'Costo' in available_metrics:
+        available_metrics.remove('Costo')
+        metrics = ['Costo'] + available_metrics
+    else:
+        metrics = available_metrics
+    
+    # Si no hay métricas, no mostrar nada
+    if len(metrics) > 0:
+        # Calcular número de filas necesarias (2 columnas)
+        num_cols_display = 2
+        num_rows = (len(metrics) + num_cols_display - 1) // num_cols_display
+        
+        # Mostrar tarjetas de métricas en grid dinámico
+        for row_idx in range(num_rows):
+            metric_cols = st.columns(num_cols_display)
+            for col_idx in range(num_cols_display):
+                idx = row_idx * num_cols_display + col_idx
+                if idx < len(metrics):
+                    metric = metrics[idx]
+                    with metric_cols[col_idx]:
+                        # Obtener valor y convertirlo a categoría
+                        if not selected_row.empty and metric in selected_row.columns:
+                            val = selected_row[metric].values[0]
+                            # Convertir a categoría si es numérico, sino mostrar como string
+                            if pd.api.types.is_numeric_dtype(_df[metric]):
+                                display_val = value_to_category(val)
+                            else:
+                                display_val = str(val)
+                        else:
+                            display_val = "--"
+                        
+                        st.markdown(f"""
+                        <div style="
+                            background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.95) 100%);
+                            padding: 12px 10px;
+                            border-radius: 10px;
+                            text-align: center;
+                            box-shadow: 0 2px 8px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.06);
+                            border: 1px solid rgba(226,232,240,0.8);
+                            transition: all 0.3s ease;
+                            margin-bottom: 10px;
+                        ">
+                            <p style="
+                                color: #64748b;
+                                margin: 0;
+                                font-size: 11px;
+                                font-weight: 600;
+                                text-transform: uppercase;
+                                letter-spacing: 0.5px;
+                            ">{metric}</p>
+                            <p style="
+                                color: #1e293b;
+                                margin: 4px 0 0 0;
+                                font-size: 18px;
+                                font-weight: 700;
+                            ">{display_val}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+    
+    # ---------------------------- Filtro por Tamaño ----------------------------
+    if size_col_for_filter and size_col_for_filter in _df_original.columns and pd.api.types.is_numeric_dtype(_df_original[size_col_for_filter]):
+        st.markdown("---")
+        st.markdown("**🔍 Filtro por Tamaño:**")
+        
+        # Obtener valores min/max del DataFrame original
+        col_min = float(_df_original[size_col_for_filter].min())
+        col_max = float(_df_original[size_col_for_filter].max())
+        
+        # Usar session_state para mantener los valores del filtro
+        filter_key = "slider_filter_size"
+        
+        # Obtener valores actuales del slider
+        current_filter_value = st.session_state.get(filter_key, (col_min, col_max))
+        
+        # Asegurar que los valores estén en el rango válido
+        current_min = max(col_min, min(col_max, current_filter_value[0]))
+        current_max = min(col_max, max(col_min, current_filter_value[1]))
+        
+        # Si los valores están fuera de rango, resetearlos
+        if current_min < col_min or current_max > col_max or current_min > current_max:
+            current_min = col_min
+            current_max = col_max
+            st.session_state[filter_key] = (current_min, current_max)
+        
+        min_val, max_val = st.slider(
+            f"Rango de {size_col_for_filter}",
+            min_value=col_min,
+            max_value=col_max,
+            value=(current_min, current_max),
+            key=filter_key
+        )
+        
+        # Aplicar filtro cuando cambie
+        if min_val != current_min or max_val != current_max:
+            apply_filter_to_data(min_val, max_val)
+        
+        # Mostrar información y botón para limpiar
+        _df_filtered_check = _df_original[_df_original[size_col_for_filter] >= min_val].copy()
+        _df_filtered_check = _df_filtered_check[_df_filtered_check[size_col_for_filter] <= max_val].copy()
+        
+        if len(_df_filtered_check) != len(_df_original):
+            st.info(f"📊 Mostrando {len(_df_filtered_check)} de {len(_df_original)} registros")
+            if st.button("🔄 Limpiar Filtro", key="clear_size_filter", use_container_width=True):
+                # Resetear el filtro al rango completo
+                st.session_state[filter_key] = (col_min, col_max)
+                st.rerun()
+        elif len(_df_filtered_check) == 0:
+            st.warning("⚠️ No hay datos que coincidan con el filtro")
+    
+    st.markdown("---")
+    st.markdown("**Ajustar Valores:**")
+    
+    # Determinar si hay proyecto seleccionado
+    is_project_selected = selected_project != "Selecciona un proyecto..."
+    
+    # Obtener la columna de tamaño desde session_state
+    current_size_col = st.session_state.get('size_col', None)
+    
+    # Obtener valores actuales (o valores por defecto si no hay selección)
+    if is_project_selected:
+        current_x = working.loc[working['Label'] == selected_project, 'X'].values[0]
+        current_y = working.loc[working['Label'] == selected_project, 'Y'].values[0]
+        if current_size_col and current_size_col in _df.columns:
+            current_size_value = _df.loc[_df['Label'] == selected_project, current_size_col].values[0]
+        else:
+            current_size_value = 0.0
+    else:
+        current_x = 0.0
+        current_y = 0.0
+        current_size_value = 0.0
+    
+    # Determinar rango del slider de tamaño basado en los datos
+    if current_size_col and current_size_col in _df.columns:
+        min_size_slider = _df[current_size_col].min()
+        max_size_slider = _df[current_size_col].max()
+        # Usar un step más pequeño si el rango es muy grande
+        if max_size_slider - min_size_slider > 1000:
+            step_size = (max_size_slider - min_size_slider) / 1000
+        else:
+            step_size = 0.01 if max_size_slider - min_size_slider < 100 else 1.0
+    else:
+        min_size_slider = 0
+        max_size_slider = 100
+        step_size = 1.0
+    
+    # Sliders verticales (uno debajo del otro)
+    new_x = st.slider(
+        f"📊 {x_label}",
+        min_value=-120.0,
+        max_value=120.0,
+        value=float(current_x),
+        step=1.0,
+        key="slider_x",
+        disabled=not is_project_selected
+    )
+    
+    new_y = st.slider(
+        f"📊 {y_label}",
+        min_value=-120.0,
+        max_value=120.0,
+        value=float(current_y),
+        step=1.0,
+        key="slider_y",
+        disabled=not is_project_selected
+    )
+    
+    # Slider genérico para la columna de tamaño (solo si hay una columna seleccionada)
+    if current_size_col and current_size_col in _df.columns:
+        new_size_value = st.slider(
+            f"💰 {current_size_col}",
+            min_value=float(min_size_slider),
+            max_value=float(max_size_slider),
+            value=float(current_size_value),
+            step=float(step_size),
+            key="slider_size_col",
+            disabled=not is_project_selected
+        )
+    else:
+        new_size_value = current_size_value
+    
+    # Actualizar los valores si cambiaron (solo si hay proyecto seleccionado)
+    if is_project_selected:
+        if new_x != current_x or new_y != current_y:
+            # Actualizar working DataFrame (para la visualización)
+            working.loc[working['Label'] == selected_project, 'X'] = new_x
+            working.loc[working['Label'] == selected_project, 'Y'] = new_y
+            # Actualizar session state
+            st.session_state.data.loc[st.session_state.data['Label'] == selected_project, 'X'] = new_x
+            st.session_state.data.loc[st.session_state.data['Label'] == selected_project, 'Y'] = new_y
+        
+        if current_size_col and current_size_col in _df.columns and new_size_value != current_size_value:
+            # Actualizar _df (que contiene la columna de tamaño)
+            _df.loc[_df['Label'] == selected_project, current_size_col] = new_size_value
+            # Recalcular Radius_px basado en el nuevo valor (normalizando a 0-100 primero)
+            size_values = _df[current_size_col]
+            normalized_values, min_val, max_val = normalize_to_0_100(size_values)
+            working['Radius_px'] = 10 + (normalized_values / 100) * 40
+            st.session_state.data['Radius_px'] = working['Radius_px']
+    
+    st.markdown("---")
+    st.info("💡 **Tip:** Selecciona un proyecto y ajusta sus valores con los sliders")
+    
+    # Botón de descarga CSV
+    st.markdown("---")
+    _df_export = _df.copy()
+    
+    # Asegurar que Label esté primero, seguido de las columnas de ejes, luego el resto
+    cols_order = ["Label"]
+    if x_label in _df_export.columns and x_label != "Label":
+        cols_order.append(x_label)
+    if y_label in _df_export.columns and y_label != "Label" and y_label != x_label:
+        cols_order.append(y_label)
+    # Agregar todas las demás columnas que no están en cols_order
+    for col in _df_export.columns:
+        if col not in cols_order:
+            cols_order.append(col)
+    _df_export = _df_export[cols_order]
+    
+    csv = _df_export.to_csv(index=False).encode("utf-8")
+    st.download_button("📥 Descargar CSV", csv, file_name="cuadrante_mapa_calor.csv", mime="text/csv", use_container_width=True)
 
-# El canvas se genera siempre desde el estado base (sin cambios durante interacciones)
-# Solo leeremos el canvas cuando el usuario descargue el CSV
+# ---------------------------- Columna del Gráfico (izquierda) ----------------------------
+with main_col:
+    # Calcular rango de radios para el mapa de calor
+    radii = []
+    for _, r in working.iterrows():
+        radius = float(r.get("Radius_px", 20.0))
+        if radius < 5:
+            radius = 20.0
+        radii.append(radius)
 
-x0_px = x_to_px(0.0)
-y0_px = y_to_px(0.0)
+    min_radius = min(radii) if radii else 10
+    max_radius = max(radii) if radii else 50
 
-objects = [
-    # Ejes bloqueados
-    {"type": "line", "x1": PAD, "y1": y0_px, "x2": CANVAS_W - PAD, "y2": y0_px,
-     "stroke": "#9CA3AF", "strokeWidth": 1, "strokeDashArray": [6,4],
-     "selectable": False, "evented": False, "hoverCursor": "default"},
-    {"type": "line", "x1": x0_px, "y1": PAD, "x2": x0_px, "y2": CANVAS_H - PAD,
-     "stroke": "#9CA3AF", "strokeWidth": 1, "strokeDashArray": [6,4],
-     "selectable": False, "evented": False, "hoverCursor": "default"},
-    # Labels de ejes en ambos extremos (plomo, pequeños, fijos)
-    {"type": "textbox", "left": PAD, "top": y0_px + 10, "originX": "left",  "originY": "top",    "text": str(x_label), "fontSize": 10, "fill": "#6B7280", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False},
-    {"type": "textbox", "left": CANVAS_W - PAD, "top": y0_px + 10, "originX": "right", "originY": "top",    "text": str(x_label), "fontSize": 10, "fill": "#6B7280", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False},
-    {"type": "textbox", "left": x0_px + 10, "top": PAD,           "originX": "left",  "originY": "top",    "text": str(y_label), "fontSize": 10, "fill": "#6B7280", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False},
-    {"type": "textbox", "left": x0_px + 10, "top": CANVAS_H - PAD, "originX": "left",  "originY": "bottom", "text": str(y_label), "fontSize": 10, "fill": "#6B7280", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False},
-]
+    # Obtener valores reales de la columna de tamaño para la leyenda
+    size_col_for_legend = st.session_state.get('size_col', None)
+    size_values_for_legend = []
+    if size_col_for_legend and size_col_for_legend in _df.columns:
+        for _, r in working.iterrows():
+            val = _df.loc[_df['Label'] == r['Label'], size_col_for_legend].values
+            if len(val) > 0:
+                size_values_for_legend.append(val[0])
+        min_size = min(size_values_for_legend) if size_values_for_legend else 0
+        max_size = max(size_values_for_legend) if size_values_for_legend else 100
+    else:
+        min_size = 0
+        max_size = 100
 
-# Ticks -10..10
-for t in range(-10, 11):
-    x_val = (t / 10.0) * x_abs_max
-    x_px = x_to_px(x_val)
-    objects.append({"type": "line", "x1": x_px, "y1": y0_px - 4, "x2": x_px, "y2": y0_px + 4, "stroke": "#CBD5E1", "strokeWidth": 1, "selectable": False, "evented": False})
-    if t % 2 == 0:
-        objects.append({"type": "textbox", "left": x_px, "top": y0_px + 14, "originX": "center", "originY": "top", "text": str(t), "fontSize": 9, "fill": "#9CA3AF", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False})
-    y_val = (t / 10.0) * y_abs_max
-    y_px = y_to_px(y_val)
-    objects.append({"type": "line", "x1": x0_px - 4, "y1": y_px, "x2": x0_px + 4, "y2": y_px, "stroke": "#CBD5E1", "strokeWidth": 1, "selectable": False, "evented": False})
-    if t % 2 == 0:
-        objects.append({"type": "textbox", "left": x0_px - 8, "top": y_px, "originX": "right", "originY": "center", "text": str(t), "fontSize": 9, "fill": "#9CA3AF", "fontFamily": "Arial", "editable": False, "selectable": False, "evented": False})
+    # Preparar datos para Plotly
+    colors = []
+    opacities = []
+    sizes = []
+    hover_texts = []
 
-# Labels de datos (solo texto)
-for i, (_, r) in enumerate(working.iterrows()):
-    cx = float(x_to_px(r["X"]))
-    cy = float(y_to_px(r["Y"]))
-    color = PALETTE[i % len(PALETTE)]
-    label = str(r["Label"]) if "Label" in r else str(i)
-    font_px = float(r.get("Font_px", 14.0))
-    width_px = float(r.get("Width_px", 180.0))
-    objects.append({
-        "type": "textbox",
-        "left": cx, "top": cy,
-        "originX": "center", "originY": "center",
-        "text": label,
-        "fontSize": font_px, "fontFamily": "Arial",
-        "width": width_px,
-        "fill": color,
-        "editable": False, "selectable": True,
-        "hasControls": True, "lockUniScaling": False, "lockScalingFlip": True,
-        "splitByGrapheme": True, "textAlign": "center",
-        "name": f"lbl::{label}",
-        "scaleX": 1.0, "scaleY": 1.0
-    })
+    for _, r in working.iterrows():
+        radius = float(r.get("Radius_px", 20.0))
+        if radius < 5:
+            radius = 20.0
 
-# Key única para cada conjunto de datos (usa el sig ya obtenido arriba)
-canvas_key = f"magic_quadrant_canvas_{sig}"
-canvas_json_key = f"__canvas_initial_{sig}__"
+        # Asignar color y opacidad basados en el tamaño (mapa de calor)
+        color = get_heatmap_color(radius, min_radius, max_radius)
+        opacity = get_heatmap_opacity(radius, min_radius, max_radius)
 
-# Generar initial_json solo la primera vez para este conjunto de datos
-# Guardarlo para reutilizar en reruns y evitar que el canvas se regenere
-if canvas_json_key not in st.session_state:
-    # Primera vez con este CSV: generar y guardar
-    initial_json = {"version": "5.2.4", "objects": objects}
-    st.session_state[canvas_json_key] = initial_json
-else:
-    # Reruns subsecuentes con el mismo CSV: reutilizar el guardado
-    initial_json = st.session_state[canvas_json_key]
+        colors.append(color)
+        opacities.append(opacity)
+        # Plotly usa el área de marker size, convertir radius a size apropiado
+        sizes.append(radius * 2)  # Multiplicar por 2 para mejor visualización
 
-canvas_res = st_canvas(
-    fill_color="rgba(0,0,0,0)", background_color="#ffffff",
-    height=CANVAS_H, width=CANVAS_W,
-    drawing_mode="transform",
-    initial_drawing=initial_json,
-    display_toolbar=False,
-    key=canvas_key
-)
+        # Crear tooltip con formato personalizado
+        hover_info = [f"<b>{r['Label']}</b>"]
 
-# ---------------------------- Lectura del canvas y exportación ----------------------------
+        # Agregar todas las columnas (excepto Label y la columna de tamaño, que irá al final)
+        # Excluir columnas técnicas internas
+        exclude_cols = ['Label', 'Radius_px', 'Font_px', 'Width_px']
+        if size_col_for_legend:
+            exclude_cols.append(size_col_for_legend)
 
-# Leer el estado actual del canvas para exportar
-# Esto NO causa reruns, solo lee los datos cuando el usuario interactúa con el botón
-df_live = _apply_canvas_to_df(canvas_res.json_data if canvas_res else None, get_state_df())
+        for col in _df.columns:
+            if col not in exclude_cols:
+                val = _df.loc[_df['Label'] == r['Label'], col].values
+                if len(val) > 0:
+                    # Formatear según el tipo de dato
+                    if col in _df.select_dtypes(include=['number']).columns:
+                        hover_info.append(f"{col}: {val[0]:.2f}")
+                    else:
+                        hover_info.append(f"{col}: {val[0]}")
 
-# Exportar: combinar datos originales con posiciones actualizadas
-# Partir del CSV original para mantener todas las columnas
-_df_export = _df.copy()
+        # Agregar la columna de tamaño al final si existe
+        if size_col_for_legend and size_col_for_legend in _df.columns:
+            val = _df.loc[_df['Label'] == r['Label'], size_col_for_legend].values
+            if len(val) > 0:
+                # Formatear según si es numérico o no
+                if pd.api.types.is_numeric_dtype(_df[size_col_for_legend]):
+                    hover_info.append(f"{size_col_for_legend}: {val[0]:.2f}")
+                else:
+                    hover_info.append(f"{size_col_for_legend}: {val[0]}")
 
-# Actualizar con los datos del canvas (posiciones, tamaños)
-df_live_renamed = df_live.rename(columns={"X": x_label, "Y": y_label})
+        hover_texts.append("<br>".join(hover_info))
 
-# Actualizar las columnas de ejes con las posiciones del canvas
-for col in [x_label, y_label]:
-    if col in _df_export.columns and col in df_live_renamed.columns:
-        _df_export[col] = df_live_renamed[col]
+    # Crear figura de Plotly
+    fig = go.Figure()
 
-# Actualizar o agregar Font_px y Width_px
-_df_export["Font_px"] = df_live_renamed["Font_px"]
-_df_export["Width_px"] = df_live_renamed["Width_px"]
+    # Definir rangos fijos de -120 a 120
+    x_abs_max = 120
+    y_abs_max = 120
+    
+    # Dividir el espacio en categorías descriptivas (6 categorías)
+    # Para negativos: Sin valor (-120 a -60), Muy bajo (-60 a 0)
+    # Para positivos: Bajo (0 a 40), Medio (40 a 80), Alto (80 a 120)
+    
+    # Posiciones de las categorías (6 categorías) - ajustadas para rango -120 a 120
+    category_positions = [-100, -60, -20, 20, 60, 100]
+    # Etiquetas descriptivas: 3 negativas y 3 positivas
+    category_labels = ["Sin Valor", "Muy Bajo", "Bajo", "Medio", "Alto", "Muy Alto"]
+    
+    # Agregar líneas divisorias entre categorías
+    # Línea principal en x=0 y y=0 (división entre negativos y positivos)
+    fig.add_shape(type="line",
+        x0=0, y0=-120, x1=0, y1=120,
+        line=dict(color="#9CA3AF", width=1.5, dash="dash"),
+        layer="below"
+    )
+    
+    fig.add_shape(type="line",
+        x0=-120, y0=0, x1=120, y1=0,
+        line=dict(color="#9CA3AF", width=1.5, dash="dash"),
+        layer="below"
+    )
+    
+    # Líneas divisorias secundarias en los puntos de división
+    for divider in [-80, -40, 40, 80]:
+        # Línea vertical
+        fig.add_shape(type="line",
+            x0=divider, y0=-120, x1=divider, y1=120,
+            line=dict(color="#D1D5DB", width=0.8, dash="dot"),
+            layer="below"
+        )
+        # Línea horizontal
+        fig.add_shape(type="line",
+            x0=-120, y0=divider, x1=120, y1=divider,
+            line=dict(color="#D1D5DB", width=0.8, dash="dot"),
+            layer="below"
+        )
 
-# Asegurar que Label esté primero, seguido de las columnas de ejes, luego el resto
-cols_order = ["Label"]
-if x_label in _df_export.columns and x_label != "Label":
-    cols_order.append(x_label)
-if y_label in _df_export.columns and y_label != "Label" and y_label != x_label:
-    cols_order.append(y_label)
-# Agregar todas las demás columnas que no están en cols_order
-for col in _df_export.columns:
-    if col not in cols_order:
-        cols_order.append(col)
-_df_export = _df_export[cols_order]
+    # Crear una colorscale personalizada para la leyenda
+    colorscale_values = [
+        [0.0, "#FFFF99"],   # Amarillo muy claro
+        [0.2, "#FFFF00"],   # Amarillo brillante
+        [0.4, "#FFAA00"],   # Naranja claro
+        [0.6, "#FF6600"],   # Naranja oscuro
+        [0.8, "#FF0000"],   # Rojo
+        [1.0, "#BB0000"],   # Rojo muy oscuro
+    ]
 
-csv = _df_export.to_csv(index=False).encode("utf-8")
-st.download_button("📥 Descargar CSV actualizado (estado actual)", csv, file_name="cuadrante_actualizado.csv", mime="text/csv")
+    # Agregar las burbujas con colorscale
+    # Usar enumerate para obtener índice posicional en lugar del índice del DataFrame
+    for list_idx, (df_idx, row) in enumerate(working.iterrows()):
+        # Calcular el valor normalizado para la colorbar basado en los valores originales de la columna de tamaño
+        if size_col_for_legend and size_col_for_legend in _df.columns:
+            # Obtener el valor original de la columna de tamaño
+            size_val = _df.loc[_df['Label'] == row['Label'], size_col_for_legend].values
+            if len(size_val) > 0:
+                original_value = size_val[0]
+                # Normalizar entre min_size y max_size para el colorbar (0-1)
+                normalized_value = (original_value - min_size) / (max_size - min_size) if max_size > min_size else 0.5
+                normalized_value = max(0, min(1, normalized_value))  # Asegurar que esté en rango 0-1
+            else:
+                normalized_value = 0.5
+        else:
+            # Si no hay columna de tamaño, usar el radius
+            radius = float(row.get("Radius_px", 20.0))
+            if radius < 5:
+                radius = 20.0
+            normalized_value = (radius - min_radius) / (max_radius - min_radius) if max_radius > min_radius else 0.5
+
+        # Verificar si esta burbuja es la seleccionada
+        is_selected = (selected_project != "Selecciona un proyecto..." and row['Label'] == selected_project)
+
+        # Configurar el borde y opacidad según si está seleccionada
+        if is_selected:
+            border_width = 4
+            border_color = '#1e3a5f'  # Azul oscuro para destacar
+            bubble_opacity = 1.0  # Opacidad completa
+        else:
+            border_width = 0
+            border_color = '#ffffff'
+            # Si hay una selección, hacer las demás burbujas más transparentes
+            if selected_project != "Selecciona un proyecto...":
+                # Usar list_idx en lugar de idx para acceder a las listas
+                bubble_opacity = opacities[list_idx] * 0.4 if list_idx < len(opacities) else 0.5  # Reducir opacidad al 40%
+            else:
+                bubble_opacity = opacities[list_idx] if list_idx < len(opacities) else 0.5
+
+        fig.add_trace(go.Scatter(
+            x=[row['X']],
+            y=[row['Y']],
+            mode='markers',
+            marker=dict(
+                size=sizes[list_idx] if list_idx < len(sizes) else 40,
+                color=[normalized_value],  # Usar valor normalizado para la colorbar
+                colorscale=colorscale_values,
+                cmin=0,
+                cmax=1,
+                opacity=bubble_opacity,
+                line=dict(width=border_width, color=border_color),
+                showscale=True if list_idx == 0 else False,  # Mostrar colorbar solo en la primera burbuja
+                colorbar=dict(
+                    title=(size_col_for_legend if size_col_for_legend else "Tamaño") if list_idx == 0 else None,
+                    titleside="right",
+                    tickmode="linear",
+                    tick0=0,
+                    dtick=0.25,
+                    tickvals=[0, 0.25, 0.5, 0.75, 1.0],
+                    ticktext=[
+                        f"{min_size:.2f}",
+                        f"{min_size + (max_size - min_size) * 0.25:.2f}",
+                        f"{min_size + (max_size - min_size) * 0.5:.2f}",
+                        f"{min_size + (max_size - min_size) * 0.75:.2f}",
+                        f"{max_size:.2f}"
+                    ] if list_idx == 0 else None,
+                    len=0.4,
+                    thickness=15,
+                    x=1.02
+                ) if list_idx == 0 else None
+            ),
+            hovertemplate=hover_texts[list_idx] + '<extra></extra>' if list_idx < len(hover_texts) else '<extra></extra>',
+            showlegend=False
+        ))
+
+    # Configurar layout con categorías descriptivas
+    fig.update_layout(
+        width=1100,
+        height=1100,  # Hacer el gráfico cuadrado para mantener la proporción 1:1
+        plot_bgcolor='white',
+        xaxis=dict(
+            title=x_label,
+            zeroline=False,
+            gridcolor='#E5E7EB',
+            range=[-120, 120],
+            showgrid=True,
+            tickmode="array",
+            tickvals=category_positions,  # Posiciones de las categorías
+            ticktext=category_labels,  # Etiquetas descriptivas
+            titlefont=dict(size=14),
+            side="bottom",  # Título en la parte inferior
+            tickfont=dict(size=11)
+        ),
+        yaxis=dict(
+            title=y_label,
+            zeroline=False,
+            gridcolor='#E5E7EB',
+            range=[-120, 120],
+            showgrid=True,
+            tickmode="array",
+            tickvals=category_positions,  # Posiciones de las categorías
+            ticktext=category_labels,  # Etiquetas descriptivas
+            scaleanchor="x",
+            scaleratio=1,
+            tickfont=dict(size=11)
+        ),
+        hovermode='closest',
+        margin=dict(l=60, r=60, t=40, b=60)
+    )
+
+    # Mostrar el gráfico (ocupa todo el ancho)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Información sobre controles
+    st.info("💡 **Controles:** Pasa el cursor sobre las burbujas para ver detalles | Usa la rueda del mouse para zoom | Arrastra para mover la vista | Doble clic para resetear")
