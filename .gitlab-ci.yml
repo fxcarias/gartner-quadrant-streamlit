@@ -1,0 +1,84 @@
+image: docker:stable
+
+stages:
+  - configure
+  - clean
+  - build
+  - run
+
+variables:
+  DOCKER_HOST: tcp://docker:2375/
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  REP_NAME: gartner-streamlit-app
+
+Configure:
+  stage: configure
+  only:
+    - develop
+  before_script:
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - ssh-keyscan -H "$AWS_EC2_URL" >> ~/.ssh/known_hosts
+    - apk add rsync
+  script:
+    - rsync -av  ./install.sh  $AWS_EC2_USER@$AWS_EC2_URL:~/
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "bash install.sh"
+
+Cleaning:
+  stage: clean
+  only:
+    - develop
+  before_script:
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - echo "$AWS_EC2_URL"
+    - ssh-keyscan -H "$AWS_EC2_URL" >> ~/.ssh/known_hosts
+  script:
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "cd ~/$REP_NAME && docker compose stop || true"
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "cd ~/$REP_NAME && docker compose rm -f || true"
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "rm -r -f ~/$REP_NAME || true"
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "docker ps"
+
+Transfer:
+  stage: build
+  only:
+    - develop
+  before_script:
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - ssh-keyscan -H "$AWS_EC2_URL" >> ~/.ssh/known_hosts
+    - apk add rsync
+  script:
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "mkdir $REP_NAME || true"
+    - rsync -av  ./*  $AWS_EC2_USER@$AWS_EC2_URL:~/$REP_NAME
+    - rsync -avzP ./.[^.]*   $AWS_EC2_USER@$AWS_EC2_URL:~/$REP_NAME
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "ls $REP_NAME"
+
+Executing:
+  stage: run
+  environment:
+    name: develop
+    url: http://dashboards.fuxion.com/
+  only:
+    - develop
+  before_script:
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - ssh-keyscan -H "$AWS_EC2_URL" >> ~/.ssh/known_hosts
+  script:
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "cd ~/$REP_NAME && docker compose build"
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "cd ~/$REP_NAME && docker compose up -d"
+    - ssh $AWS_EC2_USER@$AWS_EC2_URL "docker ps"
